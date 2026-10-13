@@ -33,6 +33,8 @@ export interface ViewInput {
   depthRect?: { x: number; y: number; width: number; height: number };
   /** Mirror the reference horizontally before use (web photos rarely follow a convention). */
   flip?: boolean;
+  /** Use this view for shape (thickness) only, not for texture: set when it is unknown which side of the object it shows. */
+  geometryOnly?: boolean;
 }
 
 export type BackShape = 'auto' | 'mirror' | 'round' | 'flat' | 'reference';
@@ -108,7 +110,10 @@ export interface MeshResult {
     gridWidth: number;
     gridHeight: number;
     usedDepth: boolean;
+    /** References used for texture (and shape). */
     usedRefs: ViewName[];
+    /** References used for shape only (`geometryOnly`). */
+    shapeOnlyRefs: ViewName[];
     backShape: Exclude<BackShape, 'auto'>;
     backTexture: Exclude<BackTexture, 'auto'>;
     watertight: boolean;

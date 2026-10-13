@@ -1,6 +1,5 @@
 import './styles.css';
-import { createByte, cropRGBA, maskBBox, padRect, resizeByte } from './core/imageops';
-import { limitSize } from './core/reconstruct';
+import { createByte, cropRGBA, limitSize, maskBBox, padRect, resizeByte } from './core/imageops';
 import type { ReconstructWorkerIn, ReconstructWorkerOut } from './core/reconstruct.worker';
 import { alphaMask, hasUsefulAlpha, refineMatte, segmentByColor } from './core/segment';
 import {
@@ -20,8 +19,21 @@ import { MLClient } from './ml/client';
 import { DEFAULT_MODELS, type MLProgress } from './ml/protocol';
 import { apiHealth, browserSearchLinks, proxied, searchReferences, type SearchResult } from './search/client';
 import { LABELS, PROMPT, queryFromFilename, topLabels } from './search/identify';
-import { autoAssign, CANDIDATE_VIEWS, scoreWithClip, scoreWithColor, viewPrompts, type CandidateView, type Scored } from './search/rank';
-import { blobToRGBA, drawPreview, readDataTransfer, rgbaToCanvas, urlToRGBA, type DroppedImage } from './ui/imageio';
+import {
+  autoAssign,
+  CANDIDATE_VIEWS,
+  frontEndColors,
+  objectColors,
+  scoreWithClip,
+  scoreWithColor,
+  viewPrompts,
+  whichEnd,
+  type CandidateView,
+  type Scored,
+  type SideEnd,
+} from './search/rank';
+import { loadSamples, sampleResults, type Sample } from './search/samples';
+import { blobToRGBA, drawPreview, nameFromUrl, readDataTransfer, rgbaToCanvas, urlToRGBA, type DroppedImage } from './ui/imageio';
 import { Viewer, type Shading } from './viewer/viewer';
 
 // ---------------------------------------------------------------------------
@@ -44,6 +56,10 @@ interface Photo {
 interface RefSlot extends Photo {
   flip: boolean;
   resultId?: string;
+  /** Sets the depth only, no texture: a side view of which it is unknown which end of the object it shows. */
+  shapeOnly: boolean;
+  /** One of a bundled sample's reference images. */
+  sample: boolean;
 }
 
 interface Candidate {
@@ -51,10 +67,19 @@ interface Candidate {
   thumb?: RGBAImage;
   score?: Scored;
   failed?: boolean;
+  /** Object colours, for telling which end of the object a side view shows. */
+  colors?: Float32Array;
 }
 
 const FRONT_MAX = 2048;
 const REF_MAX = 1024;
+
+/** The static demo build (npm run build:demo): no search server, sample images bundled. */
+const DEMO = import.meta.env.MODE === 'demo';
+const DEMO_SEARCH_NOTE = 'Live web search needs the TrueForm server (npm start). This hosted demo bundles sample reference images (3D renders) instead.';
+const DEMO_AI_NOTE = 'Not available in the hosted demo — run TrueForm locally';
+const SHAPE_ONLY_NOTE =
+  'Shape only: it is not clear which end of the object this side view shows, so it sets the depth but paints no texture (a wrong guess would put, say, a beak on a tail). Click to use its texture as well.';
 
 const state = {
   front: null as Photo | null,
@@ -72,6 +97,9 @@ const state = {
   clipLabelVecs: null as Float32Array[] | null,
   frontEmbedding: null as Float32Array | null,
   generation: 0,
+  samples: [] as Sample[],
+  /** Set while the photo and candidates are a bundled sample's. */
+  sampleId: null as string | null,
 };
 
 function loadSettings(): ReconstructSettings {
@@ -87,7 +115,9 @@ function loadSettings(): ReconstructSettings {
 function saveSettings() {
   try {
     localStorage.setItem('trueform.settings', JSON.stringify(state.settings));
-    localStorage.setItem('trueform.ai', JSON.stringify(state.ai));
+    // AI off is only the demo's default, so it must not overwrite the choice saved by the full app.
+    const ai = DEMO ? { ...state.ai, enabled: JSON.parse(localStorage.getItem('trueform.ai') || '{}').enabled } : state.ai;
+    localStorage.setItem('trueform.ai', JSON.stringify(ai));
   } catch {
     // storage unavailable
   }
@@ -102,6 +132,8 @@ function loadAiPrefs() {
   } catch {
     // storage unavailable
   }
+  // The hosted demo cannot download models.
+  if (DEMO) prefs.enabled = false;
   // ?ai=0 forces the classical pipeline (offline use, automated tests).
   if (new URLSearchParams(location.search).get('ai') === '0') prefs.enabled = false;
   return prefs;
@@ -388,6 +420,10 @@ function updateBrowserLinks() {
 }
 
 async function runSearch(): Promise<boolean> {
+  if (DEMO) {
+    $('search-status').textContent = DEMO_SEARCH_NOTE;
+    return false;
+  }
   const qInput = $('query') as HTMLInputElement;
   let q = qInput.value.trim();
   if (!q && state.front) {
@@ -406,6 +442,11 @@ async function runSearch(): Promise<boolean> {
     const res = await searchReferences(q, true);
     state.candidates = res.results.slice(0, 60).map((result) => ({ result }));
     state.rankMode = null;
+    if (state.sampleId) {
+      // The candidates are web results now, not the sample's.
+      state.sampleId = null;
+      renderSamples();
+    }
     renderResults();
     const failed = res.errors.length ? ` (${res.errors.map((e) => e.provider).filter((v, i, a) => a.indexOf(v) === i).join(', ')} unavailable)` : '';
     status.textContent = state.candidates.length
@@ -433,9 +474,10 @@ async function mapLimit<T>(items: T[], limit: number, fn: (t: T, i: number) => P
   );
 }
 
-async function rankCandidates() {
+/** Ranks the candidates against the photo; returns how many could be loaded and ranked. */
+async function rankCandidates(): Promise<number> {
   const p = state.front;
-  if (!p) return;
+  if (!p) return 0;
   await mapLimit(state.candidates, 6, async (c) => {
     try {
       c.thumb = await urlToRGBA(c.result.thumbnail, 256);
@@ -447,7 +489,7 @@ async function rankCandidates() {
   if (!ok.length) {
     $('search-status').textContent = 'None of the found images could be downloaded. Try another search or drag images in.';
     renderResults();
-    return;
+    return 0;
   }
   const hints = ok.map((c) => c.result.hint);
   let scored: Scored[] | null = null;
@@ -475,8 +517,11 @@ async function rankCandidates() {
   state.candidates.sort((a, b) => (b.score?.similarity ?? -1) - (a.score?.similarity ?? -1));
   renderResults();
   ($('autopick-btn') as HTMLButtonElement).disabled = false;
-  $('search-status').textContent = `${ok.length} images ranked by ${state.rankMode === 'clip' ? 'visual similarity (CLIP)' : 'colour similarity'}. Hover a result to use it as a view.`;
+  $('search-status').textContent = `${ok.length} images ranked by ${rankedBy()}. Hover a result to use it as a view.`;
+  return ok.length;
 }
+
+const rankedBy = () => (state.rankMode === 'clip' ? 'visual similarity (CLIP)' : 'colour similarity');
 
 const VIEW_LABEL: Record<CandidateView, string> = { front: 'front', back: 'back', side: 'side', top: 'top' };
 
@@ -522,25 +567,118 @@ async function assignCandidate(view: ViewName, c: Candidate) {
   }
 }
 
+/** Colours of a candidate's object, cut out of its thumbnail where the backdrop is plain (else its central region). */
+function candidateColors(c: Candidate): Float32Array | null {
+  if (!c.thumb) return null;
+  if (!c.colors) {
+    const seg = segmentByColor(c.thumb, { tolerance: tolerance(), enclosedHoles: true, workSize: 256 });
+    c.colors = objectColors(c.thumb, seg.method === 'color-key' && seg.confidence >= 0.5 ? seg.mask : null);
+  }
+  return c.colors;
+}
+
 async function autoPick(): Promise<ViewName[]> {
   const ranked = state.candidates.filter((c) => c.score);
   if (!ranked.length || !state.rankMode) return [];
+  // Side views are placed by matching their colours to the two ends of the photo's cut-out.
+  const front = state.front;
+  if (front) await ensureMask(front);
+  const ends = front?.mask ? frontEndColors(front.image, front.mask) : null;
+  const sideOf = (i: number): SideEnd | null => {
+    const colors = ends && candidateColors(ranked[i]);
+    return ends && colors ? whichEnd(colors, ends).end : null;
+  };
   const picks = autoAssign(
     ranked.map((c, i) => ({ ...c.score!, index: i })),
     state.rankMode,
+    sideOf,
   );
   const done: ViewName[] = [];
-  for (const [slot, idx] of Object.entries(picks) as [ViewName, number][]) {
-    if (state.refs[slot]) continue;
+  for (const slot of VIEW_NAMES) {
+    const idx = picks.slots[slot];
+    if (idx === undefined || state.refs[slot]) continue;
     try {
       const loaded = await loadCandidate(ranked[idx], REF_MAX);
-      setRef(slot, { ...loaded, flip: false });
+      setRef(slot, { ...loaded, flip: false, shapeOnly: picks.shapeOnly.includes(slot) });
       done.push(slot);
     } catch {
       // skip images that cannot be fetched
     }
   }
   return done;
+}
+
+/** "back, left, right (shape only)" */
+const describeViews = (views: ViewName[]) => views.map((v) => (state.refs[v]?.shapeOnly ? `${v} (shape only)` : v)).join(', ');
+
+// ---------------------------------------------------------------------------
+// Bundled samples
+
+/** Resolves once a sample's candidates are ranked; generating waits for it so it does not search the web instead. */
+let sampleRanking: Promise<unknown> | null = null;
+let healthCheck: ReturnType<typeof apiHealth> = Promise.resolve(null);
+
+function renderSamples() {
+  const box = $('sample-buttons');
+  box.innerHTML = '';
+  for (const sample of state.samples) {
+    const b = el('button', { class: `chip${state.sampleId === sample.id ? ' active' : ''}`, text: sample.title, 'data-sample': sample.id, title: `Load the sample photo and its reference views: ${sample.query}` });
+    b.onclick = () => void loadSample(sample);
+    box.append(b);
+  }
+  $('samples').hidden = state.samples.length === 0;
+}
+
+async function loadSample(sample: Sample) {
+  if (state.busy) {
+    toast('Wait for the current model to finish.');
+    return;
+  }
+  try {
+    const res = await fetch(sample.photo);
+    if (!res.ok) throw new Error(`Could not load the sample photo (${res.status})`);
+    const image = await blobToRGBA(await res.blob(), FRONT_MAX);
+    // Views picked for a previous photo belong to another object.
+    for (const v of VIEW_NAMES) state.refs[v] = null;
+    renderSlots();
+    state.sampleId = sample.id;
+    renderSamples();
+    await setFront(image, `${sample.id}.jpg`, 'sample photo');
+    ($('query') as HTMLInputElement).value = sample.query;
+    updateBrowserLinks();
+    state.candidates = sampleResults(sample).map((result) => ({ result }));
+    state.rankMode = null;
+    renderResults();
+    const status = $('search-status');
+    status.textContent = `${state.candidates.length} sample reference images (studio renders of a test object, bundled with the demo). Ranking by similarity…`;
+    const ranking = rankCandidates();
+    sampleRanking = ranking;
+    const ranked = await ranking.finally(() => {
+      if (sampleRanking === ranking) sampleRanking = null;
+    });
+    if (ranked) {
+      const live = !!(await healthCheck)?.providers?.length;
+      const next = live ? 'Hover a result to use it as a view, or search the web for more.' : DEMO ? 'Live web search needs the TrueForm server (npm start).' : 'Hover a result to use it as a view.';
+      status.textContent = `${ranked} sample reference images (studio renders of a test object, bundled with the demo), ranked by ${rankedBy()}. ${next}`;
+    }
+  } catch (e) {
+    toast(`Could not load the sample: ${(e as Error).message}`, 'error');
+  }
+}
+
+/** A photo of the user's own replaces the sample, so the sample's references no longer apply. */
+function leaveSample() {
+  if (!state.sampleId) return;
+  state.sampleId = null;
+  state.candidates = [];
+  state.rankMode = null;
+  for (const v of VIEW_NAMES) state.refs[v] = null;
+  ($('query') as HTMLInputElement).value = '';
+  $('search-status').textContent = '';
+  ($('autopick-btn') as HTMLButtonElement).disabled = true;
+  renderResults();
+  renderSlots();
+  renderSamples();
 }
 
 // ---------------------------------------------------------------------------
@@ -553,19 +691,25 @@ const SLOT_INFO: Record<ViewName, string> = {
   top: 'Top',
 };
 
-function setRef(view: ViewName, data: { image: RGBAImage; name: string; source: string; flip: boolean; resultId?: string } | null) {
-  state.refs[view] = data ? { ...data } : null;
+function setRef(view: ViewName, data: { image: RGBAImage; name: string; source: string; flip: boolean; resultId?: string; shapeOnly?: boolean } | null) {
+  // While a sample is open the candidates are its bundled images.
+  state.refs[view] = data ? { ...data, shapeOnly: !!data.shapeOnly, sample: !!state.sampleId && !!data.resultId } : null;
+  if (urlSlot?.view === view) urlSlot = null;
   renderSlots();
   renderResults();
   scheduleRegenerate();
 }
 
+/** The slot showing an address field instead of its buttons (window.prompt is blocked in embedded hosts). */
+let urlSlot: { view: ViewName; draft: string } | null = null;
+
 function renderSlots() {
   const box = $('slots');
   box.innerHTML = '';
+  let focus: HTMLInputElement | null = null;
   for (const v of VIEW_NAMES) {
     const ref = state.refs[v];
-    const slot = el('div', { class: `slot${ref ? ' filled' : ''}`, 'data-view': v });
+    const slot = el('div', { class: `slot${ref ? ' filled' : ''}${ref?.shapeOnly ? ' shape-only' : ''}`, 'data-view': v });
     const title = el('div', { class: 'slot-title' }, el('span', { text: SLOT_INFO[v] }));
     const body = el('div', { class: 'slot-body' });
     if (ref) {
@@ -574,6 +718,18 @@ function renderSlots() {
       drawPreview(c, img, null, 160);
       body.append(c);
       slot.title = `From: ${ref.source}`;
+      if (ref.shapeOnly) {
+        const badge = el('button', { class: 'slot-badge', text: 'shape only', title: SHAPE_ONLY_NOTE });
+        badge.onclick = () => {
+          ref.shapeOnly = false;
+          renderSlots();
+          scheduleRegenerate();
+        };
+        body.append(badge);
+      }
+    } else if (urlSlot?.view === v) {
+      focus = slotUrlInput(v);
+      body.append(focus);
     } else {
       body.append(el('span', { class: 'placeholder', text: 'Drop image' }));
     }
@@ -590,13 +746,19 @@ function renderSlots() {
       const clear = el('button', { text: '✕', title: 'Remove' });
       clear.onclick = () => setRef(v, null);
       actions.append(flip, clear);
+    } else if (urlSlot?.view === v) {
+      const add = el('button', { text: 'Add', title: 'Load this address' });
+      add.onclick = () => submitSlotUrl(v);
+      const cancel = el('button', { text: '✕', title: 'Cancel' });
+      cancel.onclick = () => closeSlotUrl();
+      actions.append(add, cancel);
     } else {
       const up = el('button', { text: 'File', title: 'Upload an image' });
       up.onclick = () => pickFile((f) => loadIntoSlot(v, { kind: 'file', blob: f, name: f.name }));
       const url = el('button', { text: 'URL', title: 'Paste an image address' });
       url.onclick = () => {
-        const u = prompt(`Image address for the ${SLOT_INFO[v].toLowerCase()} view:`);
-        if (u && /^https?:\/\//i.test(u.trim())) void loadIntoSlot(v, { kind: 'url', url: u.trim(), name: 'web-image' });
+        urlSlot = { view: v, draft: '' };
+        renderSlots();
       };
       actions.append(up, url);
     }
@@ -604,6 +766,46 @@ function renderSlots() {
     wireDrop(slot, (d) => loadIntoSlot(v, d));
     box.append(slot);
   }
+  focus?.focus();
+}
+
+function slotUrlInput(v: ViewName): HTMLInputElement {
+  const input = el('input', {
+    type: 'url',
+    class: 'slot-url',
+    placeholder: 'https://…',
+    spellcheck: 'false',
+    'aria-label': `Image address for the ${SLOT_INFO[v].toLowerCase()} view`,
+  });
+  input.value = urlSlot?.draft ?? '';
+  input.oninput = () => {
+    if (urlSlot) urlSlot.draft = input.value;
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submitSlotUrl(v);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeSlotUrl();
+    }
+  });
+  return input;
+}
+
+function submitSlotUrl(v: ViewName) {
+  const u = (urlSlot?.draft ?? '').trim();
+  if (!/^https?:\/\/\S+$/i.test(u)) {
+    toast('Paste an image address starting with https://', 'error');
+    return;
+  }
+  closeSlotUrl();
+  void loadIntoSlot(v, { kind: 'url', url: u, name: nameFromUrl(u) });
+}
+
+function closeSlotUrl() {
+  urlSlot = null;
+  renderSlots();
 }
 
 function flipped(img: RGBAImage): RGBAImage {
@@ -731,13 +933,20 @@ function buildSettings() {
   };
   aiToggle.append(cb, 'Use AI models in the browser (depth, matting, CLIP · ~250 MB, downloaded once and cached)');
   ai.append(aiToggle);
+  // The models come from the Hugging Face Hub, which the hosted demo cannot reach.
+  if (DEMO) {
+    cb.disabled = true;
+    aiToggle.classList.add('disabled');
+    aiToggle.title = DEMO_AI_NOTE;
+    ai.append(el('p', { class: 'hint', id: 'ai-note', text: `${DEMO_AI_NOTE}.` }));
+  }
   const models: [keyof typeof state.ai, string][] = [
     ['depthModel', 'Depth model'],
     ['segmentModel', 'Matting model'],
     ['clipModel', 'Similarity model'],
   ];
   const grid = el('div', { class: 'settings' });
-  for (const [k, label] of models) {
+  for (const [k, label] of DEMO ? [] : models) {
     const input = el('input', { type: 'text', value: String(state.ai[k]), spellcheck: 'false' });
     input.onchange = () => {
       (state.ai[k] as string) = input.value.trim() || (DEFAULT_MODELS as Record<string, string>)[k.replace('Model', '')];
@@ -778,13 +987,25 @@ function scheduleRegenerate() {
 
 let reconWorker: Worker | null = null;
 let reconSeq = 0;
+/** Set once the worker has answered; until then an error means it never started. */
+let reconWorkerAlive = false;
+let reconOnMainThread = false;
 
 function runReconstruct(input: ReconstructInput, onProgress: (stage: string, f: number) => void): Promise<MeshResult> {
-  reconWorker ??= new Worker(new URL('./core/reconstruct.worker.ts', import.meta.url), { type: 'module' });
-  const id = ++reconSeq;
+  if (!reconOnMainThread && !reconWorker) {
+    try {
+      reconWorker = new Worker(new URL('./core/reconstruct.worker.ts', import.meta.url), { type: 'module' });
+    } catch (e) {
+      console.warn('Reconstruction worker unavailable, running on the main thread', e);
+      reconOnMainThread = true;
+    }
+  }
   const w = reconWorker;
+  if (reconOnMainThread || !w) return reconstructHere(input, onProgress);
+  const id = ++reconSeq;
   return new Promise((resolve, reject) => {
     const onMsg = (e: MessageEvent<ReconstructWorkerOut>) => {
+      reconWorkerAlive = true;
       if (e.data.id !== id) return;
       if (e.data.kind === 'progress') onProgress(e.data.stage, e.data.fraction);
       else {
@@ -794,13 +1015,33 @@ function runReconstruct(input: ReconstructInput, onProgress: (stage: string, f: 
       }
     };
     w.addEventListener('message', onMsg);
-    w.onerror = (e) => reject(new Error(e.message || 'Reconstruction worker failed'));
+    w.onerror = (e) => {
+      w.removeEventListener('message', onMsg);
+      if (reconWorkerAlive) {
+        reject(new Error(e.message || 'Reconstruction worker failed'));
+        return;
+      }
+      // The worker script could not start (blocked or failed to load): do the work here instead.
+      e.preventDefault();
+      console.warn(`Reconstruction worker failed to start, running on the main thread${e.message ? ` (${e.message})` : ''}`);
+      w.terminate();
+      reconWorker = null;
+      reconOnMainThread = true;
+      reconstructHere(input, onProgress).then(resolve, reject);
+    };
     w.postMessage({ id, input } satisfies ReconstructWorkerIn);
   });
 }
 
-function toView(p: Photo & { flip?: boolean }): ViewInput {
-  return { image: p.image, mask: p.mask!, depth: p.depth, depthRect: p.depthRect, flip: p.flip };
+async function reconstructHere(input: ReconstructInput, onProgress: (stage: string, f: number) => void): Promise<MeshResult> {
+  const { reconstruct } = await import('./core/reconstruct');
+  // Let the progress overlay paint before the page blocks.
+  await nextFrame();
+  return reconstruct(input, onProgress);
+}
+
+function toView(p: Photo & { flip?: boolean; shapeOnly?: boolean }): ViewInput {
+  return { image: p.image, mask: p.mask!, depth: p.depth, depthRect: p.depthRect, flip: p.flip, geometryOnly: p.shapeOnly };
 }
 
 async function generate(opts: { quick?: boolean } = {}) {
@@ -812,7 +1053,11 @@ async function generate(opts: { quick?: boolean } = {}) {
   const btn = $('generate-btn') as HTMLButtonElement;
   btn.disabled = true;
   btn.textContent = 'Generating…';
-  if (!opts.quick) progress.show('Building your 3D model');
+  if (!opts.quick) {
+    progress.show('Building your 3D model');
+    // The intro would show around the dialog.
+    $('empty-state').hidden = true;
+  }
   const step = (t: string) => (opts.quick ? null : progress.step(t));
   try {
     let li = step('Cutting out the object');
@@ -826,11 +1071,14 @@ async function generate(opts: { quick?: boolean } = {}) {
 
     const hasRefs = VIEW_NAMES.some((v) => state.refs[v]);
     if (!opts.quick && !hasRefs && ($('auto-refs') as HTMLInputElement).checked) {
-      step('Looking up reference views of this object on the web');
-      if (!state.candidates.length || !state.rankMode) await runSearch();
+      step(state.sampleId ? 'Picking reference views from the sample images' : 'Looking up reference views of this object on the web');
+      if (sampleRanking) await sampleRanking;
+      let searched = true;
+      if (!state.candidates.length || !state.rankMode) searched = await runSearch();
       const picked = await autoPick();
-      if (picked.length) step(`Using web photos for: ${picked.join(', ')}`);
-      else progress.warn('No confident matches for the back/sides on the web — using shape priors instead. You can pick or drop views manually.');
+      if (picked.length) step(`Using ${state.sampleId ? 'sample' : 'web'} images for: ${describeViews(picked)}`);
+      else if (DEMO && !searched) progress.warn(`${DEMO_SEARCH_NOTE} Using shape priors for the hidden sides; you can drop views in manually.`);
+      else progress.warn(`No confident matches for the back/sides ${state.sampleId ? 'among the sample images' : 'on the web'} — using shape priors instead. You can pick or drop views manually.`);
     }
     progress.set(0.5);
 
@@ -860,7 +1108,12 @@ async function generate(opts: { quick?: boolean } = {}) {
   } catch (e) {
     progress.warn((e as Error).message);
     toast((e as Error).message, 'error');
-    if (!opts.quick) setTimeout(() => ($('progress').hidden = true), 4000);
+    if (!opts.quick) {
+      setTimeout(() => {
+        $('progress').hidden = true;
+        if (!state.result) $('empty-state').hidden = false;
+      }, 4000);
+    }
   } finally {
     state.busy = false;
     btn.disabled = false;
@@ -872,7 +1125,10 @@ async function generate(opts: { quick?: boolean } = {}) {
 function showResult(result: MeshResult) {
   state.result = result;
   state.atlasCanvas = rgbaToCanvas(result.atlas);
-  viewer ??= new Viewer($('viewer'));
+  if (!viewer) {
+    viewer = new Viewer($('viewer'));
+    viewer.compareInsets = stageInsets;
+  }
   viewer.setModel(result, state.atlasCanvas);
   viewer.setShading(currentShading);
   viewer.setWireframe($('wire-btn').getAttribute('aria-pressed') === 'true');
@@ -880,9 +1136,13 @@ function showResult(result: MeshResult) {
   $('toolbar').hidden = false;
   $('exports').hidden = false;
   const s = result.stats;
+  const shapeOnly = s.shapeOnlyRefs ?? [];
+  const all = [...s.usedRefs, ...shapeOnly];
+  const sample = all.length > 0 && all.every((v) => state.refs[v]?.sample);
   const views = s.usedRefs.length ? s.usedRefs.join(', ') : 'none';
+  const shapeNote = shapeOnly.length ? ` · <span title="Side views of which it is unclear which end of the object they show set the depth only, not the texture.">shape only: <b>${shapeOnly.join(', ')}</b></span>` : '';
   $('stats').hidden = false;
-  $('stats').innerHTML = `<b>${s.triangles.toLocaleString()}</b> triangles · depth: <b>${s.usedDepth ? 'AI' : 'silhouette'}</b> · web views: <b>${views}</b> · back: <b>${s.backShape}/${s.backTexture}</b> · ${
+  $('stats').innerHTML = `<b>${s.triangles.toLocaleString()}</b> triangles · depth: <b>${s.usedDepth ? 'AI' : 'silhouette'}</b> · reference views${sample ? ' (sample)' : ''}: <b>${views}</b>${shapeNote} · back: <b>${s.backShape}/${s.backTexture}</b> · ${
     s.watertight ? '<span class="ok">watertight ✓</span>' : 'open mesh'
   }`;
 }
@@ -891,6 +1151,22 @@ function showResult(result: MeshResult) {
 // Viewer toolbar + export
 
 let currentShading: Shading = 'lit';
+
+/** How far the toolbar and stats (top) and the compare and export bars (bottom) reach into the 3D view; on phones they sit outside it. */
+function stageInsets() {
+  const view = $('viewer').getBoundingClientRect();
+  let top = 0;
+  let bottom = 0;
+  for (const id of ['toolbar', 'stats']) {
+    const r = $(id).getBoundingClientRect();
+    if (r.height) top = Math.max(top, r.bottom - view.top);
+  }
+  for (const id of ['compare-bar', 'exports']) {
+    const r = $(id).getBoundingClientRect();
+    if (r.height) bottom = Math.max(bottom, view.bottom - r.top);
+  }
+  return { top, bottom };
+}
 
 function wireToolbar() {
   document.querySelectorAll<HTMLButtonElement>('[data-shading]').forEach((b) => {
@@ -911,8 +1187,9 @@ function wireToolbar() {
   toggle('wire-btn', (on) => viewer?.setWireframe(on));
   toggle('rotate-btn', (on) => viewer?.setAutoRotate(on));
   toggle('compare-btn', (on) => {
-    viewer?.setCompare(on);
+    // Shown first, so the photo is laid out clear of it.
     $('compare-bar').hidden = !on;
+    viewer?.setCompare(on);
     if (on) {
       // The exact comparison is against the unlit render (the photo already contains the lighting).
       document.querySelector<HTMLButtonElement>('[data-shading="unlit"]')?.click();
@@ -1008,9 +1285,29 @@ function wireInputs() {
 async function loadFront(d: DroppedImage) {
   try {
     const loaded = await loadDropped(d, FRONT_MAX);
+    if (d.kind !== 'result') leaveSample();
     await setFront(loaded.image, loaded.name, loaded.source);
   } catch (e) {
     toast((e as Error).message, 'error');
+  }
+}
+
+function showSearchBadge(health: Awaited<ReturnType<typeof apiHealth>>) {
+  const sb = $('search-badge');
+  if (health?.providers?.length) {
+    sb.textContent = `Web search: ${health.providers.length} source${health.providers.length > 1 ? 's' : ''}`;
+    sb.title = health.providers.map((p) => p.label).join(', ');
+    sb.className = 'badge on';
+  } else if (DEMO) {
+    sb.textContent = 'Web search: samples';
+    sb.className = 'badge';
+    sb.title = DEMO_SEARCH_NOTE;
+    const status = $('search-status');
+    if (!status.textContent) status.textContent = DEMO_SEARCH_NOTE;
+  } else {
+    sb.textContent = 'Web search: offline';
+    sb.className = 'badge warn';
+    sb.title = 'The search API is not reachable. Use “Search in your own browser” and drag images in.';
   }
 }
 
@@ -1021,19 +1318,31 @@ async function boot() {
   wireToolbar();
   updateBrowserLinks();
   setAiBadge(state.ai.enabled ? 'AI: on' : 'AI: off', state.ai.enabled ? 'on' : '');
-  const health = await apiHealth();
-  const sb = $('search-badge');
-  if (health?.providers?.length) {
-    sb.textContent = `Web search: ${health.providers.length} source${health.providers.length > 1 ? 's' : ''}`;
-    sb.title = health.providers.map((p) => p.label).join(', ');
-    sb.className = 'badge on';
-  } else {
-    sb.textContent = 'Web search: offline';
-    sb.className = 'badge warn';
-    sb.title = 'The search API is not reachable. Use “Search in your own browser” and drag images in.';
+  if (DEMO) $('ai-badge').title = DEMO_AI_NOTE;
+  $('export-note').hidden = !DEMO;
+  $('samples-note').hidden = !DEMO;
+  // The hosted demo has no search server; do not even probe the host for one.
+  healthCheck = DEMO ? Promise.resolve(null) : apiHealth();
+  void healthCheck.then(showSearchBadge);
+  state.samples = await loadSamples();
+  renderSamples();
+  // ?sample=<id> opens a sample directly; the demo opens with the first one, already built.
+  const wanted = new URLSearchParams(location.search).get('sample');
+  const sample = state.samples.find((s) => s.id === wanted) ?? (DEMO ? state.samples[0] : undefined);
+  if (sample && !state.front) {
+    await loadSample(sample);
+    if (DEMO && state.front) await generate();
   }
-  // Expose a tiny hook for automated tests.
-  (window as unknown as { __trueform: unknown }).__trueform = { state, generate, setFront };
 }
 
-void boot();
+// A small hook for automated tests and recordings; `ready` resolves once the page has finished opening.
+(window as unknown as { __trueform: unknown }).__trueform = {
+  state,
+  generate,
+  setFront,
+  loadSample,
+  get viewer() {
+    return viewer;
+  },
+  ready: boot(),
+};

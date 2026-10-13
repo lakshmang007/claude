@@ -3,6 +3,7 @@ import { distanceTransform } from '../../src/core/distance';
 import { pushPull } from '../../src/core/imageops';
 import { reconstruct } from '../../src/core/reconstruct';
 import { segmentByColor } from '../../src/core/segment';
+import { detectCaps } from '../../src/core/shape';
 import { DEFAULT_SETTINGS, type ReconstructSettings, type ViewInput } from '../../src/core/types';
 import { bounds, disc, fieldOf, iou, maskOf, paint, signedVolume, type RGB } from './helpers';
 
@@ -246,6 +247,117 @@ describe('reconstruction', () => {
       // On a ball every normal points away from the centre.
       expect(n[0] * d[0] + n[1] * d[1] + n[2] * d[2]).toBeGreaterThan(0);
     }
+  });
+
+  it('gives an upright cylinder a flat base and a flat top', () => {
+    // 120 x 300 px, the top shoulders rounded (radius 20).
+    const can = (x: number, y: number) => {
+      if (x < 40 || x > 160 || y < 50 || y > 350) return false;
+      const cx = x < 60 ? 60 : x > 140 ? 140 : x;
+      return y >= 70 || Math.hypot(x - cx, y - 70) <= 20;
+    };
+    const res = reconstruct({ front: frontView(200, 400, can, BLUE), refs: {}, settings: settings() });
+    expect(res.stats.watertight).toBe(true);
+    expect(signedVolume(res.positions, res.indices)).toBeGreaterThan(0);
+    const b = bounds(res.positions);
+    // Still a round cross-section: as deep as it is wide.
+    expect(b.size[2] / b.size[0]).toBeGreaterThan(0.85);
+    expect(b.size[2] / b.size[0]).toBeLessThan(1.15);
+    const unit = 1 / res.stats.gridHeight;
+    // The bottom ring of vertices spans the whole depth (a disc), not a ridge.
+    let zMin = Infinity, zMax = -Infinity;
+    for (let v = 0; v < res.positions.length; v += 3) {
+      if (res.positions[v + 1] > b.min[1] + 0.25 * unit) continue;
+      zMin = Math.min(zMin, res.positions[v + 2]);
+      zMax = Math.max(zMax, res.positions[v + 2]);
+    }
+    expect((zMax - zMin) / b.size[2]).toBeGreaterThan(0.9);
+    // Faces lying in the base face straight down, and so do their vertex normals
+    // (apart from slivers at the corners, where the base meets the side).
+    let area = 0, down = 0, smooth = 0;
+    const P = res.positions, N = res.normals;
+    for (let t = 0; t < res.indices.length; t += 3) {
+      const [a, c, d] = [res.indices[t] * 3, res.indices[t + 1] * 3, res.indices[t + 2] * 3];
+      if (Math.max(P[a + 1], P[c + 1], P[d + 1]) > b.min[1] + 0.25 * unit) continue;
+      const e1 = [P[c] - P[a], P[c + 1] - P[a + 1], P[c + 2] - P[a + 2]];
+      const e2 = [P[d] - P[a], P[d + 1] - P[a + 1], P[d + 2] - P[a + 2]];
+      const n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+      const len = Math.hypot(n[0], n[1], n[2]);
+      if (len < 1e-12) continue;
+      area += len;
+      down += -n[1];
+      if (Math.max(N[a + 1], N[c + 1], N[d + 1]) < -0.9) smooth += len;
+    }
+    expect(down / area).toBeGreaterThan(0.95);
+    expect(smooth / area).toBeGreaterThan(0.95);
+    // The base disc is about as wide as the object (nearly the whole bottom outline is flat).
+    expect(area / 2 / (Math.PI * (b.size[0] / 2) * (b.size[2] / 2))).toBeGreaterThan(0.75);
+    // The flat top between the shoulders is a cap too, the rounded shoulders are not.
+    let topDepth = 0;
+    for (let v = 0; v < res.positions.length; v += 3) {
+      if (res.positions[v + 1] < b.max[1] - 0.25 * unit) continue;
+      topDepth = Math.max(topDepth, Math.abs(res.positions[v + 2]));
+    }
+    expect((2 * topDepth) / b.size[2]).toBeGreaterThan(0.5);
+  });
+
+  it('keeps a flat base full depth when the depth map bleeds into the backdrop there', () => {
+    const can = (x: number, y: number) => x > 40 && x < 160 && y > 50 && y < 350;
+    // Round relief that fades to the backdrop over the bottom 5 px, as a depth network's would.
+    const depth = (x: number, y: number) => (can(x, y) ? 0.2 + 0.8 * Math.sqrt(Math.max(0, 1 - ((x - 100) / 60) ** 2)) * Math.min(1, (350 - y) / 5) : 0);
+    const res = reconstruct({ front: frontView(200, 400, can, BLUE, depth), refs: {}, settings: settings({ resolution: 128 }) });
+    expect(res.stats.usedDepth).toBe(true);
+    expect(res.stats.watertight).toBe(true);
+    const b = bounds(res.positions);
+    const unit = 1 / res.stats.gridHeight;
+    const depthAt = (y0: number) => {
+      let lo = Infinity, hi = -Infinity;
+      for (let v = 0; v < res.positions.length; v += 3) {
+        if (Math.abs(res.positions[v + 1] - y0) > 0.5 * unit) continue;
+        lo = Math.min(lo, res.positions[v + 2]);
+        hi = Math.max(hi, res.positions[v + 2]);
+      }
+      return hi - lo;
+    };
+    expect(depthAt(b.min[1]) / depthAt(b.min[1] + b.size[1] / 2)).toBeGreaterThan(0.9);
+  });
+
+  it('finds flat ends only where walls rise from a straight or shallow outline', () => {
+    const at = (w: number, h: number, shape: (x: number, y: number) => boolean, res: number) => {
+      const mask = maskOf(w, h, shape);
+      const g = res / Math.max(w, h);
+      const W = Math.round(w * g), H = Math.round(h * g);
+      const small = maskOf(W, H, (x, y) => shape(x / g, y / g));
+      const inside = Uint8Array.from(small.data, (v) => (v >= 128 ? 1 : 0));
+      return detectCaps(inside, W, H, mask).map((c) => c.side).sort();
+    };
+    expect(at(200, 200, disc(100, 100, 80), 128)).toEqual([]);
+    expect(at(200, 200, disc(100, 100, 20), 256)).toEqual([]);
+    // A lying bar's long edges are rims of a cylinder, not flat ends.
+    expect(at(400, 200, (x, y) => x > 50 && x < 350 && y > 70 && y < 130, 160)).toEqual([]);
+    expect(at(400, 200, (x, y) => ((x - 200) / 150) ** 2 + ((y - 100) / 40) ** 2 <= 1, 160)).toEqual([]);
+    expect(at(200, 400, (x, y) => ((x - 100) / 60) ** 2 + ((y - 200) / 150) ** 2 <= 1, 160)).toEqual([]);
+    expect(at(200, 400, (x, y) => x > 40 && x < 160 && y > 50 && y < 350, 128)).toEqual(['bottom', 'top']);
+    // A can seen from a little above: its base outline is half an ellipse.
+    const persp = (x: number, y: number) => Math.abs(x - 100) <= 60 && y >= 60 && (y <= 330 || ((x - 100) / 60) ** 2 + ((y - 330) / 14) ** 2 <= 1);
+    expect(at(200, 400, persp, 128)).toEqual(['bottom', 'top']);
+  });
+
+  it('uses geometry-only references for thickness but not for texture', () => {
+    const shape = disc(100, 100, 80);
+    const ellipse = (x: number, y: number) => ((x - 100) / 40) ** 2 + ((y - 100) / 80) ** 2 <= 1;
+    const side: ViewInput = { ...frontView(200, 200, ellipse, BLUE), geometryOnly: true };
+    const back: ViewInput = { ...frontView(300, 260, disc(150, 130, 110), BLUE), geometryOnly: true };
+    const res = reconstruct({ front: frontView(200, 200, shape, RED), refs: { right: side, back }, settings: settings() });
+    expect(res.stats.usedRefs).toEqual([]);
+    expect(res.stats.shapeOnlyRefs.sort()).toEqual(['back', 'right']);
+    expect(res.stats.backTexture).toBe('tone');
+    const ratio = bounds(res.positions).size[2] / bounds(res.positions).size[0];
+    expect(ratio).toBeLessThan(0.62);
+    // No blue from the references anywhere in the atlas.
+    let blue = 0;
+    for (let i = 0; i < res.atlas.data.length; i += 4) if (res.atlas.data[i + 2] > 150 && res.atlas.data[i] < 80) blue++;
+    expect(blue).toBe(0);
   });
 
   it('rejects an empty mask', () => {

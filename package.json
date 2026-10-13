@@ -6,6 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:demo": "vite build --mode demo",
+    "build:artifact": "npm run build:demo && node scripts/build-artifact.mjs",
+    "preview:demo": "vite preview --mode demo",
+    "samples:render": "node scripts/render-samples.mjs",
+    "demo:record": "node scripts/record-demo.mjs",
     "start": "node server/index.js",
     "test": "vitest run",
     "test:e2e": "playwright test",

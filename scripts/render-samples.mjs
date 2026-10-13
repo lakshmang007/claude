@@ -17,7 +17,7 @@ const truthDir = path.join(root, 'docs', 'demo', 'groundtruth');
 
 // Ground-truth camera convention (also written to cameras.json).
 const TRUTH = {
-  azimuthsDeg: [0, 45, 90, 135, 180],
+  azimuthsDeg: [0, 45, 90, 135, 180, 225, 270, 315],
   elevationDeg: 12,
   fovYDeg: 30,
   distance: 3,
@@ -257,7 +257,7 @@ async function writeCameras(objects) {
       up: [0, 1, 0],
       azimuthsDeg: TRUTH.azimuthsDeg,
       azimuth:
-        "0 = the main photo's viewpoint (camera on +z). Positive azimuth moves the camera towards +x (the photo's right-hand side), i.e. counter-clockwise seen from above; 90 looks at the object's +x side, 180 at its back.",
+        "0 = the main photo's viewpoint (camera on +z). Positive azimuth moves the camera towards +x (the photo's right-hand side), i.e. counter-clockwise seen from above; 90 looks at the object's +x side, 180 at its back, 270 at its -x side.",
       position: 'target + distance * [cos(el) * sin(az), sin(el), cos(el) * cos(az)]',
     },
     image: { width: TRUTH.size, height: TRUTH.size, format: 'png', background: TRUTH.background, file: '<id>-az<deg>.png' },

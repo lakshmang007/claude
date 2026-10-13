@@ -21,13 +21,17 @@ import {
   analyseSilhouette,
   applyExtentConstraints,
   backFromReference,
+  capWeights,
   depthRelief,
+  detectCaps,
   extentFromReference,
   frontShape,
   layerNormals,
+  mirrorCaps,
   profileRatio,
   rimOffsets,
   ringOffsets,
+  type Cap,
   type ExtentConstraint,
   type Relief,
 } from './shape';
@@ -44,23 +48,42 @@ interface PreparedRef {
   depth?: FloatField;
   rows: Spans;
   cols: Spans;
+  geometryOnly: boolean;
 }
 
 /**
  * Distance from every grid pixel centre to the object outline, measured on the
- * full-resolution cut-out and expressed in grid pixels.
+ * full-resolution cut-out and expressed in grid pixels. With caps, their
+ * outline does not count (the distance near a flat end is to the walls).
  */
-function fineDistance(mask: ByteField, W: number, H: number): Float32Array {
+function fineDistance(mask: ByteField, W: number, H: number, caps: Cap[] = []): Float32Array {
   // Signed distance (positive inside) at full resolution is linear across the
   // outline, so area-averaging it per grid cell and blurring it stay unbiased
   // while removing the pixel staircase of the cut-out.
-  const on = binarize(mask);
+  const n = mask.width * mask.height;
+  let on = binarize(mask);
+  let rows = mask.height;
+  let top = 0;
+  if (caps.length) {
+    const sx = mask.width / W;
+    const sy = mask.height / H;
+    const spans = caps.map((c) => ({ side: c.side, c0: Math.round(c.x0 * sx), c1: Math.round((c.x1 + 1) * sx) }));
+    // Deep enough that the walls, not the end of the mirror, are the nearest outline at a cap.
+    const half = Math.max(...caps.map((c) => (c.x1 - c.x0 + 1) / 2));
+    const m = mirrorCaps(on, mask.width, mask.height, spans, Math.ceil((half + 4) * sy));
+    on = m.data;
+    rows = m.height;
+    top = m.top;
+  }
   const off = new Uint8Array(on.length);
   for (let i = 0; i < on.length; i++) off[i] = 1 - on[i];
-  const dIn = distanceTransform(on, mask.width, mask.height).data;
-  const dOut = distanceTransform(off, mask.width, mask.height).data;
-  const signed = new Float32Array(on.length);
-  for (let i = 0; i < on.length; i++) signed[i] = on[i] ? dIn[i] - 0.5 : 0.5 - dOut[i];
+  const dIn = distanceTransform(on, mask.width, rows).data;
+  const dOut = distanceTransform(off, mask.width, rows).data;
+  const signed = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const k = i + top * mask.width;
+    signed[i] = on[k] ? dIn[k] - 0.5 : 0.5 - dOut[k];
+  }
   const grid = resizeFloat({ width: mask.width, height: mask.height, data: signed }, W, H).data;
   const s = (mask.width / W + mask.height / H) / 2;
   const smooth = blurBuffer(grid, W, H, 0.8);
@@ -100,7 +123,7 @@ function prepareRef(name: ViewName, v: ViewInput): PreparedRef | null {
   const rows = rowSpans(on, w, h);
   const cols = colSpans(on, w, h);
   if (!rows || !cols) return null;
-  return { name, image: img, mask: m, depth: croppedDepth, rows, cols };
+  return { name, image: img, mask: m, depth: croppedDepth, rows, cols, geometryOnly: !!v.geometryOnly };
 }
 
 /** Relief of a reference computed on its own grid (same density as the front grid). */
@@ -148,8 +171,12 @@ export function reconstruct(input: ReconstructInput, progress: ProgressFn = () =
   const H = Math.max(8, Math.round(crop.height * g));
   const inside = binarize(resizeByte(frontMask, W, H));
   if (!inside.some((v) => v)) throw new Error('The object is too small for the chosen resolution.');
+  // Flat ends (bottle base, cap top) keep their full thickness up to the outline.
+  const caps = detectCaps(inside, W, H, frontMask);
   const signedDist = fineDistance(frontMask, W, H);
-  const sil = analyseSilhouette(inside, W, H, signedDist);
+  const wallDist = caps.length ? fineDistance(frontMask, W, H, caps) : signedDist;
+  const sil = analyseSilhouette(inside, W, H, wallDist, caps);
+  const capW = capWeights(sil, signedDist);
   const rim = rimOffsets(sil, frontMask);
   const frontRows = rowSpans(inside, W, H)!;
   const frontCols = colSpans(inside, W, H)!;
@@ -174,7 +201,8 @@ export function reconstruct(input: ReconstructInput, progress: ProgressFn = () =
     const p = prepareRef(name, view);
     if (p) refs[name] = p;
   }
-  const usedRefs = Object.keys(refs) as ViewName[];
+  const usedRefs = (Object.keys(refs) as ViewName[]).filter((k) => !refs[k]!.geometryOnly);
+  const shapeOnlyRefs = (Object.keys(refs) as ViewName[]).filter((k) => refs[k]!.geometryOnly);
 
   // Back geometry.
   let backShape = settings.backShape;
@@ -211,6 +239,14 @@ export function reconstruct(input: ReconstructInput, progress: ProgressFn = () =
   applyExtentConstraints(sil, hF, hB, constraints);
 
   progress('Building watertight mesh', 0.55);
+  // Height factor for sliding a cap vertex by (ox, oy): the profile follows the distance to the walls.
+  const wallRatio = (p: number, ox: number, oy: number) => {
+    const i = p % W;
+    const j = (p - i) / W;
+    const wd = (x: number, y: number) => wallDist[Math.min(H - 1, Math.max(0, y)) * W + Math.min(W - 1, Math.max(0, x))];
+    const d = sil.dist[p] + ((wd(i + 1, j) - wd(i - 1, j)) / 2) * ox + ((wd(i, j + 1) - wd(i, j - 1)) / 2) * oy;
+    return profileRatio(sil.dist[p], Math.max(0.05, d), sil.radius[p]);
+  };
   // Keep a minimum wall thickness and a clean rim; allow front concavities inside.
   const minH = 0.35;
   const minT = Math.max(0.8, H * 0.004);
@@ -220,11 +256,13 @@ export function reconstruct(input: ReconstructInput, progress: ProgressFn = () =
     if (!inside[i]) continue;
     let f = hF[i];
     let b = Math.max(minH, hB[i]);
-    if (sil.dist[i] <= 2) f = Math.max(minH, f);
-    // Rim vertices sit exactly on the outline, where the surface meets the rim.
+    if (sil.dist[i] <= 2 || capW[i] > 0) f = Math.max(minH, f);
+    // Rim vertices sit exactly on the outline, where the surface meets the rim;
+    // on a cap they keep their height and the side wall becomes the flat face.
     if (rim.snapped[i]) {
-      f = minH;
-      b = minH;
+      const k = capW[i] ? wallRatio(i, rim.offset[i * 2], rim.offset[i * 2 + 1]) : 1;
+      f = minH + (Math.max(minH, f * k) - minH) * capW[i];
+      b = minH + (Math.max(minH, b * k) - minH) * capW[i];
     }
     if (f + b < minT) b = minT - f;
     zF[i] = fs.zRim[i] + f;
@@ -234,7 +272,7 @@ export function reconstruct(input: ReconstructInput, progress: ProgressFn = () =
   const layout = atlasLayout(crop.width, crop.height, settings.textureSize);
   // Put the second and third vertex rings at exactly 1 and 2 px from the outline
   // (the first is already on it) and move their heights along the rim profile.
-  const rings = ringOffsets(sil, signedDist);
+  const rings = ringOffsets(sil, signedDist, capW, wallDist);
   const edgeOffset = new Float32Array(rim.offset);
   for (let i = 0; i < n; i++) {
     if (!inside[i] || rim.snapped[i]) continue;
@@ -253,8 +291,8 @@ export function reconstruct(input: ReconstructInput, progress: ProgressFn = () =
     hFront[i] = zF[i] - fs.zRim[i];
     hBack[i] = fs.zRim[i] - zB[i];
   }
-  const normalF = layerNormals(sil, signedDist, hFront, fs.zRim, 1, rings.dist);
-  const normalB = layerNormals(sil, signedDist, hBack, fs.zRim, -1, rings.dist);
+  const normalF = layerNormals(sil, wallDist, hFront, fs.zRim, 1, rings.dist);
+  const normalB = layerNormals(sil, wallDist, hBack, fs.zRim, -1, rings.dist);
   const mesh = buildTwoLayerMesh({
     gridW: W,
     gridH: H,
@@ -267,14 +305,16 @@ export function reconstruct(input: ReconstructInput, progress: ProgressFn = () =
     edgeDir: rim.dir,
     normalF,
     normalB,
+    cap: capW,
   });
 
   progress('Baking texture', 0.7);
+  const backTex = refs.back && !refs.back.geometryOnly;
   let backTexture = settings.backTexture;
-  if (backTexture === 'auto') backTexture = refs.back ? 'reference' : 'tone';
-  if (backTexture === 'reference' && !refs.back) backTexture = 'tone';
+  if (backTexture === 'auto') backTexture = backTex ? 'reference' : 'tone';
+  if (backTexture === 'reference' && !backTex) backTexture = 'tone';
   const texRef = (r: PreparedRef | undefined): TextureRef | undefined => {
-    if (!r) return undefined;
+    if (!r || r.geometryOnly) return undefined;
     const matched = matchColors(r.image, r.mask, frontImage, frontMask, settings.colorMatch);
     return { image: bleedReference(matched, r.mask), rows: r.rows, cols: r.cols };
   };
@@ -320,18 +360,12 @@ export function reconstruct(input: ReconstructInput, progress: ProgressFn = () =
       gridHeight: H,
       usedDepth: !!relief,
       usedRefs,
+      shapeOnlyRefs,
       backShape,
       backTexture,
       watertight: isWatertight(mesh.positions, mesh.indices),
     },
   };
-}
-
-/** Reduce an image so its longest side is at most `max` (keeps memory in check for huge photos). */
-export function limitSize(img: RGBAImage, max: number): RGBAImage {
-  const s = max / Math.max(img.width, img.height);
-  if (s >= 1) return img;
-  return resizeRGBA(img, Math.max(1, Math.round(img.width * s)), Math.max(1, Math.round(img.height * s)));
 }
 
 export function limitFloat(f: FloatField, max: number): FloatField {

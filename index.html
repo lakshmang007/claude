@@ -13,7 +13,7 @@
         <img src="/favicon.svg" alt="" width="26" height="26" />
         <span>TrueForm 3D</span>
       </div>
-      <p class="tagline">Photo → 3D that keeps your picture exact, with the unseen sides taken from real reference photos on the web</p>
+      <p class="tagline">Photo → 3D that keeps your picture exact, with the unseen sides taken from reference images of the same object</p>
       <div class="badges">
         <span id="ai-badge" class="badge" title="In-browser AI models">AI: off</span>
         <span id="search-badge" class="badge" title="Web image search providers">Web search: …</span>
@@ -33,6 +33,11 @@
             </div>
             <canvas id="photo-preview" hidden></canvas>
           </label>
+          <div class="samples" id="samples" hidden>
+            <span class="samples-label">Try a sample</span>
+            <div class="sample-buttons" id="sample-buttons"></div>
+            <p class="hint samples-note" id="samples-note" hidden>The samples are 3D renders of test objects, not real photos. Live web search needs the local TrueForm server.</p>
+          </div>
           <div class="row wrap" id="photo-tools" hidden>
             <label class="field">Cut-out
               <select id="cutout-mode">
@@ -52,8 +57,8 @@
         </section>
 
         <section class="card" id="refs-card">
-          <h2><span class="step">2</span>Reference views from the web</h2>
-          <p class="hint">Photos of the same object from other angles. The back and sides of your model are copied from these real photos rather than invented.</p>
+          <h2><span class="step">2</span>Reference views</h2>
+          <p class="hint">Pictures of the same object from other angles: found on the web, dropped in by you, or bundled with a sample. The back and sides of your model are copied from them rather than invented.</p>
           <div class="search-row">
             <input id="query" type="search" placeholder="What is it? e.g. Nike Air Max 90" autocomplete="off" />
             <button id="identify-btn" class="ghost" title="Guess the object with in-browser AI">Identify</button>
@@ -93,40 +98,44 @@
             <h1>One photo in. A model that looks exactly like it out.</h1>
             <ol>
               <li><b>Exact front.</b> Your photo is projected onto the model pixel for pixel, so text, logos and colours survive.</li>
-              <li><b>Real back and sides.</b> Instead of guessing, TrueForm finds photos of the same object on the web and uses them for the hidden sides and the true depth.</li>
+              <li><b>Real back and sides.</b> Instead of guessing, TrueForm uses pictures of the same object (found on the web, dropped in by you, or bundled with a sample) for the hidden sides and the true depth.</li>
               <li><b>Checkable.</b> “Compare with photo” lines the model up with your picture and wipes between them.</li>
             </ol>
           </div>
         </div>
 
-        <div class="toolbar" id="toolbar" hidden>
-          <div class="segmented" role="group" aria-label="Shading">
-            <button data-shading="lit" class="active">Lit</button>
-            <button data-shading="unlit">Photo</button>
-            <button data-shading="clay">Clay</button>
+        <div class="hud-top">
+          <div class="toolbar" id="toolbar" hidden>
+            <div class="segmented" role="group" aria-label="Shading">
+              <button data-shading="lit" class="active">Lit</button>
+              <button data-shading="unlit">Photo</button>
+              <button data-shading="clay">Clay</button>
+            </div>
+            <button id="wire-btn" class="tool" aria-pressed="false">Wireframe</button>
+            <button id="rotate-btn" class="tool" aria-pressed="false">Turntable</button>
+            <button id="compare-btn" class="tool" aria-pressed="false">Compare with photo</button>
+            <button id="reset-btn" class="tool">Reset view</button>
           </div>
-          <button id="wire-btn" class="tool" aria-pressed="false">Wireframe</button>
-          <button id="rotate-btn" class="tool" aria-pressed="false">Turntable</button>
-          <button id="compare-btn" class="tool" aria-pressed="false">Compare with photo</button>
-          <button id="reset-btn" class="tool">Reset view</button>
+          <div class="stats" id="stats" hidden></div>
         </div>
 
-        <div class="compare-bar" id="compare-bar" hidden>
-          <span>3D render</span>
-          <input type="range" id="split" min="0" max="1" step="0.001" value="0.5" aria-label="Wipe between render and photo" />
-          <span>Original photo</span>
-        </div>
+        <div class="hud-bottom">
+          <div class="compare-bar" id="compare-bar" hidden>
+            <span>3D render</span>
+            <input type="range" id="split" min="0" max="1" step="0.001" value="0.5" aria-label="Wipe between render and photo" />
+            <span>Original photo</span>
+          </div>
 
-        <div class="stats" id="stats" hidden></div>
-
-        <div class="exports" id="exports" hidden>
-          <label class="field inline">Real height
-            <input type="number" id="real-height" value="20" min="0.1" step="0.1" /> cm
-          </label>
-          <button data-export="glb" class="primary small" title="glTF binary with texture — Blender, Unity, Unreal, web">GLB</button>
-          <button data-export="obj" class="small" title="OBJ + MTL + texture (zip)">OBJ</button>
-          <button data-export="stl" class="small" title="Watertight STL in millimetres for 3D printing">STL</button>
-          <button data-export="usdz" class="small" title="USDZ for iPhone / iPad AR Quick Look">USDZ</button>
+          <div class="exports" id="exports" hidden>
+            <label class="field inline">Real height
+              <input type="number" id="real-height" value="20" min="0.1" step="0.1" /> cm
+            </label>
+            <button data-export="glb" class="primary small" title="glTF binary with texture — Blender, Unity, Unreal, web">GLB</button>
+            <button data-export="obj" class="small" title="OBJ + MTL + texture (zip)">OBJ</button>
+            <button data-export="stl" class="small" title="Watertight STL in millimetres for 3D printing">STL</button>
+            <button data-export="usdz" class="small" title="USDZ for iPhone / iPad AR Quick Look">USDZ</button>
+            <p class="export-note" id="export-note" hidden>Downloads may be blocked in hosted previews. They work when you run TrueForm locally.</p>
+          </div>
         </div>
 
         <div class="progress" id="progress" hidden>

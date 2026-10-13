@@ -30,9 +30,12 @@
       45,
       90,
       135,
-      180
+      180,
+      225,
+      270,
+      315
     ],
-    "azimuth": "0 = the main photo's viewpoint (camera on +z). Positive azimuth moves the camera towards +x (the photo's right-hand side), i.e. counter-clockwise seen from above; 90 looks at the object's +x side, 180 at its back.",
+    "azimuth": "0 = the main photo's viewpoint (camera on +z). Positive azimuth moves the camera towards +x (the photo's right-hand side), i.e. counter-clockwise seen from above; 90 looks at the object's +x side, 180 at its back, 270 at its -x side.",
     "position": "target + distance * [cos(el) * sin(az), sin(el), cos(el) * cos(az)]"
   },
   "image": {
@@ -56,7 +59,10 @@
         "hot-sauce-az45.png",
         "hot-sauce-az90.png",
         "hot-sauce-az135.png",
-        "hot-sauce-az180.png"
+        "hot-sauce-az180.png",
+        "hot-sauce-az225.png",
+        "hot-sauce-az270.png",
+        "hot-sauce-az315.png"
       ],
       "boundingBox": {
         "min": [
@@ -106,6 +112,21 @@
           0,
           1.123735,
           -2.934443
+        ],
+        "225": [
+          -2.074964,
+          1.123735,
+          -2.074964
+        ],
+        "270": [
+          -2.934443,
+          1.123735,
+          0
+        ],
+        "315": [
+          -2.074964,
+          1.123735,
+          2.074964
         ]
       }
     },
@@ -116,7 +137,10 @@
         "rubber-duck-az45.png",
         "rubber-duck-az90.png",
         "rubber-duck-az135.png",
-        "rubber-duck-az180.png"
+        "rubber-duck-az180.png",
+        "rubber-duck-az225.png",
+        "rubber-duck-az270.png",
+        "rubber-duck-az315.png"
       ],
       "boundingBox": {
         "min": [
@@ -166,6 +190,21 @@
           0,
           1.123735,
           -2.934443
+        ],
+        "225": [
+          -2.074964,
+          1.123735,
+          -2.074964
+        ],
+        "270": [
+          -2.934443,
+          1.123735,
+          0
+        ],
+        "315": [
+          -2.074964,
+          1.123735,
+          2.074964
         ]
       }
     }

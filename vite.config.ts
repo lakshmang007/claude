@@ -20,11 +20,16 @@ const isolation = {
   'Cross-Origin-Embedder-Policy': 'credentialless',
 };
 
-export default defineConfig({
-  plugins: [trueformApi()],
-  server: { headers: isolation },
-  preview: { headers: isolation },
-  worker: { format: 'es' },
-  optimizeDeps: { exclude: ['@huggingface/transformers'] },
-  build: { target: 'es2022', chunkSizeWarningLimit: 4096 },
+export default defineConfig(({ mode }) => {
+  // The demo is a static bundle with relative URLs, so it can be hosted under any path.
+  const demo = mode === 'demo';
+  return {
+    base: demo ? './' : '/',
+    plugins: [trueformApi()],
+    server: { headers: isolation },
+    preview: { headers: isolation },
+    worker: { format: 'es' },
+    optimizeDeps: { exclude: ['@huggingface/transformers'] },
+    build: { target: 'es2022', chunkSizeWarningLimit: 4096, outDir: demo ? 'dist-demo' : 'dist' },
+  };
 });

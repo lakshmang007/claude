@@ -6,3 +6,5 @@ playwright-report/
 *.log
 .env
 .DS_Store
+dist-demo/
+artifact/

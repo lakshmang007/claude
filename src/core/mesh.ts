@@ -28,6 +28,12 @@ export interface TwoLayerInput {
   /** Precomputed unit normals per grid pixel (3 floats) for the front and back layers. */
   normalF?: Float32Array;
   normalB?: Float32Array;
+  /**
+   * Per grid pixel, how much the outline there is a flat end (0..1). Where it
+   * is, the side wall is a real face (bottle base, cap top), so it gets its own
+   * rim vertices with the face's normal instead of sharing the layers' ones.
+   */
+  cap?: Float32Array;
 }
 
 export interface MeshData {
@@ -48,7 +54,7 @@ export interface MeshData {
  * texture coordinate ((i + .5) / gridW, (j + .5) / gridH) of the cropped photo.
  */
 export function buildTwoLayerMesh(m: TwoLayerInput): MeshData {
-  const { gridW: W, gridH: H, inside, zF, zB, zRim, layout, edgeOffset, edgeDir, normalF, normalB } = m;
+  const { gridW: W, gridH: H, inside, zF, zB, zRim, layout, edgeOffset, edgeDir, normalF, normalB, cap } = m;
   const unit = 1 / H;
   const positions: number[] = [];
   const normals: number[] = [];
@@ -172,6 +178,91 @@ export function buildTwoLayerMesh(m: TwoLayerInput): MeshData {
   }
 
   // Side wall: front rim -> mid (front texture) and mid -> back rim (back texture).
+  const boundary: [number, number][] = [];
+  for (const [k, cnt] of edgeCount) {
+    if (cnt !== 1) continue;
+    const dir = edgeFrom.get(k)!;
+    const p = Math.floor(dir / (W * H));
+    boundary.push([p, dir - p * W * H]);
+  }
+  const isCap = (p: number) => !!cap && cap[p] >= 0.5;
+  // A cap face follows the outline, so its normal is the outline's, smoothed
+  // along it: the cut-out's pixel steps would otherwise show up as stripes.
+  const capN = new Map<number, [number, number]>();
+  const capNext = new Map<number, number[]>();
+  for (const [p, q] of boundary) {
+    if (!isCap(p) || !isCap(q)) continue;
+    // Outward normal of the wall over the directed edge p -> q (length-weighted).
+    const nx = yOf(q) - yOf(p);
+    const ny = xOf(p) - xOf(q);
+    for (const [v, u] of [[p, q], [q, p]]) {
+      const n = capN.get(v) ?? [0, 0];
+      n[0] += nx;
+      n[1] += ny;
+      capN.set(v, n);
+      const list = capNext.get(v) ?? [];
+      list.push(u);
+      capNext.set(v, list);
+    }
+  }
+  const unit2 = (n: [number, number]): [number, number] => {
+    const l = Math.hypot(n[0], n[1]) || 1;
+    return [n[0] / l, n[1] / l];
+  };
+  for (let pass = 0; pass < 4; pass++) {
+    const prev = new Map<number, [number, number]>();
+    for (const [v, n] of capN) prev.set(v, unit2(n));
+    for (const [v, n] of prev) {
+      const sum: [number, number] = [2 * n[0], 2 * n[1]];
+      for (const u of capNext.get(v)!) {
+        sum[0] += prev.get(u)![0];
+        sum[1] += prev.get(u)![1];
+      }
+      capN.set(v, unit2(sum));
+    }
+  }
+  // Neither photo sees a cap face. Colour it from the photo just inside its outline,
+  // drawn towards the cap's middle so the photo's vertical streaks and rim shading
+  // do not run across it, and use that on both halves so the face has no seam.
+  const capUV = new Map<number, [number, number]>();
+  const seen = new Set<number>();
+  for (const start of capN.keys()) {
+    if (seen.has(start)) continue;
+    const comp: number[] = [];
+    const stack = [start];
+    seen.add(start);
+    while (stack.length) {
+      const v = stack.pop()!;
+      comp.push(v);
+      for (const u of capNext.get(v)!) {
+        if (seen.has(u)) continue;
+        seen.add(u);
+        stack.push(u);
+      }
+    }
+    let cx = 0, cy = 0, nx = 0, ny = 0;
+    for (const v of comp) {
+      cx += gx(v);
+      cy += gy(v);
+      nx += capN.get(v)![0];
+      ny += capN.get(v)![1];
+    }
+    cx /= comp.length;
+    cy /= comp.length;
+    const nl = Math.hypot(nx, ny) || 1;
+    // capN is in world axes (y up); inwards on the grid (y down) is (-nx, ny).
+    const ix = -nx / nl;
+    const iy = ny / nl;
+    for (const v of comp) {
+      const px = cx + (gx(v) - cx) * 0.3 + ix * 2.5;
+      const py = cy + (gy(v) - cy) * 0.3 + iy * 2.5;
+      capUV.set(v, [(layout.front.x + (px / W) * layout.front.w) / layout.width, (layout.front.y + (py / H) * layout.front.h) / layout.height]);
+    }
+  }
+  const sideNormal = (p: number): [number, number, number] => {
+    const n = capN.get(p);
+    return n ? [n[0], n[1], 0] : wallNormal(p);
+  };
   const midF = new Map<number, number>();
   const midB = new Map<number, number>();
   const midZ = (p: number) => Math.min(zF[p], Math.max(zB[p], zRim[p])) * unit;
@@ -179,18 +270,31 @@ export function buildTwoLayerMesh(m: TwoLayerInput): MeshData {
     const map = back ? midB : midF;
     let v = map.get(p);
     if (v === undefined) {
-      const [u, vv] = uvOf(back ? layout.back : layout.front, p);
-      v = push(xOf(p), yOf(p), midZ(p), u, vv, wallNormal(p));
+      const [u, vv] = capUV.get(p) ?? uvOf(back ? layout.back : layout.front, p);
+      v = push(xOf(p), yOf(p), midZ(p), u, vv, sideNormal(p));
       map.set(p, v);
     }
     return v;
   };
-  for (const [k, cnt] of edgeCount) {
-    if (cnt !== 1) continue;
-    const dir = edgeFrom.get(k)!;
-    const p = Math.floor(dir / (W * H));
-    const q = dir - p * W * H;
-    const fp = vF[p], fq = vF[q], bp = vB[p], bq = vB[q];
+  // Cap faces meet the front and back at a crease: their rim vertices are their own.
+  const capF = new Map<number, number>();
+  const capB = new Map<number, number>();
+  const capRim = (p: number, back: boolean) => {
+    const map = back ? capB : capF;
+    let v = map.get(p);
+    if (v === undefined) {
+      const [u, vv] = capUV.get(p) ?? uvOf(back ? layout.back : layout.front, p);
+      v = push(xOf(p), yOf(p), (back ? zB[p] : zF[p]) * unit, u, vv, sideNormal(p));
+      map.set(p, v);
+    }
+    return v;
+  };
+  for (const [p, q] of boundary) {
+    const flat = isCap(p) && isCap(q);
+    const fp = flat ? capRim(p, false) : vF[p];
+    const fq = flat ? capRim(q, false) : vF[q];
+    const bp = flat ? capRim(p, true) : vB[p];
+    const bq = flat ? capRim(q, true) : vB[q];
     const mpF = getMid(p, false), mqF = getMid(q, false);
     const mpB = getMid(p, true), mqB = getMid(q, true);
     indices.push(fq, fp, mpF, fq, mpF, mqF);

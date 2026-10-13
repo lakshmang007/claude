@@ -6,6 +6,17 @@ import type { FrontFrame, MeshResult } from '../core/types';
 export type Shading = 'lit' | 'unlit' | 'clay';
 
 /**
+ * A photo texture already contains the studio lighting it was shot in, so on
+ * it the lights only add shape cues: about as much light as they take away,
+ * for an average shading near 1 (brighter washes out deep colours, a red
+ * bottle turning salmon). The environment is much brighter toward the front,
+ * so it is turned down and a fill light from behind evens it out. Bare clay
+ * has no light of its own and gets a stronger key.
+ */
+const LIT_RIG = { env: 0.3, key: 0.7, fill: 1.2, hemi: 2.5 };
+const CLAY_RIG = { env: 0.55, key: 1.6, fill: 1, hemi: 1 };
+
+/**
  * three.js viewer. Besides orbiting, it can line up an orthographic camera
  * with the original photo and wipe between photo and render, to check the
  * model reproduces the picture.
@@ -29,6 +40,14 @@ export class Viewer {
   private resizeObserver: ResizeObserver;
   private needsRender = true;
   private center = new THREE.Vector3(0, 0.5, 0);
+  /** Explicit orbit centre set by a caller; null means the model's bounding-box centre. */
+  private orbitTarget: THREE.Vector3 | null = null;
+  private gridWanted = true;
+  private key = new THREE.DirectionalLight(0xffffff, 1);
+  private fill = new THREE.DirectionalLight(0xffffff, 1);
+  private hemi = new THREE.HemisphereLight(0xffffff, 0x404040, 1);
+  /** How far other UI reaches into the view from the top and bottom (px); compare mode keeps the photo clear of it. */
+  compareInsets: () => { top: number; bottom: number } = () => ({ top: 0, bottom: 0 });
 
   constructor(private container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
@@ -48,10 +67,10 @@ export class Viewer {
 
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    const key = new THREE.DirectionalLight(0xffffff, 1.2);
-    key.position.set(2, 3, 2.5);
-    this.scene.add(key);
-    this.scene.add(new THREE.HemisphereLight(0xffffff, 0x404040, 0.4));
+    this.key.position.set(2, 3, 2.5);
+    this.fill.position.set(-2, 2, -2.5);
+    this.scene.add(this.key, this.fill, this.hemi);
+    this.applyRig();
 
     this.grid = new THREE.GridHelper(4, 40, 0x5a6478, 0x343b48);
     (this.grid.material as THREE.Material).transparent = true;
@@ -104,7 +123,8 @@ export class Viewer {
     tex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
     this.texture = tex;
     this.materials = {
-      lit: new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, metalness: 0, envMapIntensity: 0.9 }),
+      // No specular: the photo's own highlights are in the texture already.
+      lit: new THREE.MeshPhysicalMaterial({ map: tex, roughness: 1, metalness: 0, specularIntensity: 0 }),
       unlit: new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
       clay: new THREE.MeshStandardMaterial({ color: 0xc9c4bc, roughness: 0.7, metalness: 0 }),
     };
@@ -146,7 +166,17 @@ export class Viewer {
   setShading(s: Shading) {
     this.shading = s;
     if (this.mesh && this.materials) this.mesh.material = this.materials[s];
+    this.applyRig();
     this.needsRender = true;
+  }
+
+  private applyRig() {
+    const rig = this.shading === 'clay' ? CLAY_RIG : LIT_RIG;
+    // Materials lit by scene.environment take its intensity, not their own envMapIntensity.
+    this.scene.environmentIntensity = rig.env;
+    this.key.intensity = rig.key;
+    this.fill.intensity = rig.fill;
+    this.hemi.intensity = rig.hemi;
   }
 
   setWireframe(on: boolean) {
@@ -169,17 +199,76 @@ export class Viewer {
     this.needsRender = true;
   }
 
-  resetView() {
+  /** Camera distance that fits the whole model in the perspective view. */
+  private fitDistance(): number {
     const size = new THREE.Vector3();
     this.mesh?.geometry.boundingBox?.getSize(size);
     const radius = Math.max(size.x, size.y, size.z, 0.5) * 0.75;
-    const dist = radius / Math.sin(THREE.MathUtils.degToRad(this.persp.fov / 2)) * 1.1;
+    return (radius / Math.sin(THREE.MathUtils.degToRad(this.persp.fov / 2))) * 1.1;
+  }
+
+  resetView() {
+    this.orbitTarget = null;
     const dir = new THREE.Vector3(0.45, 0.2, 1).normalize();
-    this.persp.position.copy(this.center).addScaledVector(dir, dist);
+    this.persp.position.copy(this.center).addScaledVector(dir, this.fitDistance());
     this.controls.target.copy(this.center);
     this.controls.update();
     this.grid.position.y = 0;
     this.needsRender = true;
+  }
+
+  /**
+   * Place the perspective camera on a sphere around the orbit target. Azimuth 0 is
+   * the photo's viewpoint (in front of the model, looking along -z); positive
+   * azimuth moves the camera toward +x. Elevation is degrees above the horizontal.
+   * Without a distance, the camera is placed where the whole model fits.
+   */
+  setOrbit(azimuthDeg: number, elevationDeg: number, distance?: number) {
+    const az = THREE.MathUtils.degToRad(azimuthDeg);
+    const el = THREE.MathUtils.degToRad(elevationDeg);
+    const target = this.orbitTarget ?? this.center;
+    const d = distance ?? this.fitDistance();
+    const dir = new THREE.Vector3(Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el));
+    this.persp.position.copy(target).addScaledVector(dir, d);
+    this.controls.target.copy(target);
+    this.persp.lookAt(target);
+    this.controls.update();
+    this.needsRender = true;
+  }
+
+  /** Orbit around an explicit point instead of the model's centre; null goes back to the centre. */
+  setOrbitTarget(target: { x: number; y: number; z: number } | null) {
+    this.orbitTarget = target ? new THREE.Vector3(target.x, target.y, target.z) : null;
+    // Keep the camera's offset so the view does not jump.
+    const next = this.orbitTarget ?? this.center;
+    this.persp.position.add(next.clone().sub(this.controls.target));
+    this.controls.target.copy(next);
+    this.controls.update();
+    this.needsRender = true;
+  }
+
+  setFov(deg: number) {
+    this.persp.fov = THREE.MathUtils.clamp(deg, 1, 170);
+    this.persp.updateProjectionMatrix();
+    this.needsRender = true;
+  }
+
+  /** Solid background colour for the render, or null for the transparent default (the page shows through). */
+  setBackground(color: THREE.ColorRepresentation | null) {
+    this.scene.background = color === null ? null : new THREE.Color(color);
+    this.needsRender = true;
+  }
+
+  setGridVisible(on: boolean) {
+    this.gridWanted = on;
+    this.grid.visible = on && !this.comparing;
+    this.needsRender = true;
+  }
+
+  /** The model's axis-aligned bounds in world units, for framing shots. */
+  bounds(): { min: THREE.Vector3; max: THREE.Vector3; center: THREE.Vector3 } | null {
+    const box = this.mesh?.geometry.boundingBox;
+    return box ? { min: box.min.clone(), max: box.max.clone(), center: this.center.clone() } : null;
   }
 
   /** Line up with the photo's camera and show the photo on top with a wipe at `split` (0..1). */
@@ -187,7 +276,7 @@ export class Viewer {
     this.comparing = on && !!this.frame;
     this.overlay.classList.toggle('visible', this.comparing);
     this.controls.enabled = !this.comparing;
-    this.grid.visible = !this.comparing;
+    this.grid.visible = this.gridWanted && !this.comparing;
     if (this.comparing) this.layoutCompare();
     this.needsRender = true;
   }
@@ -203,11 +292,16 @@ export class Viewer {
     const H = this.container.clientHeight;
     const fw = f.right - f.left;
     const fh = f.top - f.bottom;
-    const margin = 0.9;
-    const scale = Math.min(W / fw, H / fh) * margin;
+    let { top, bottom } = this.compareInsets();
+    // On short views the overlays may cover the photo's edges rather than shrink it too far.
+    if (H - top - bottom < H * 0.55) top = bottom = 0;
+    const margin = top || bottom ? 0.96 : 0.9;
+    const scale = Math.min(W / fw, (H - top - bottom) / fh) * margin;
+    // Centre the photo in the free band; the camera moves the other way so the render stays on it.
+    const shift = (top - bottom) / 2;
     const cx = (f.left + f.right) / 2;
-    const cy = (f.top + f.bottom) / 2;
-    // Frustum bounds are relative to the camera, which sits on the frame centre.
+    const cy = (f.top + f.bottom) / 2 + shift / scale;
+    // Frustum bounds are relative to the camera.
     this.ortho.left = -W / (2 * scale);
     this.ortho.right = W / (2 * scale);
     this.ortho.top = H / (2 * scale);
@@ -219,7 +313,7 @@ export class Viewer {
     const ph = fh * scale;
     Object.assign(this.overlayImg.style, {
       left: `${(W - pw) / 2}px`,
-      top: `${(H - ph) / 2}px`,
+      top: `${(H - ph) / 2 + shift}px`,
       width: `${pw}px`,
       height: `${ph}px`,
     });

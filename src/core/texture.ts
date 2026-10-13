@@ -1,9 +1,9 @@
 import { colSpans, rowSpans, spanAt, spanLineAt, spanT, type Spans } from './align';
-import { bleedRGBA, blurBuffer, clamp, createRGBA, pushPull, resizeByte, resizeRGBA, sampleFloat, sampleRGBA } from './imageops';
+import { bleedRGBA, blurBuffer, clamp, createRGBA, pushPull, resizeByte, resizeFloat, resizeRGBA, sampleFloat, sampleRGBA } from './imageops';
 import { distanceTransform } from './distance';
 import type { AtlasLayout } from './mesh';
 import { backWarpCoord } from './shape';
-import type { ByteField, RGBAImage } from './types';
+import type { ByteField, FloatField, RGBAImage } from './types';
 
 /** A reference photo cropped to its object, flipped as requested, colour-matched and bled. */
 export interface TextureRef {
@@ -33,6 +33,37 @@ export interface TextureInput {
 }
 
 const ATLAS_PAD = 16;
+
+/**
+ * Seam fade: texels whose |nz| is below SEAM_HI move towards the interior
+ * colour, fully below SEAM_LO. Within RIM_PX of the outline, where the photo
+ * mixes in backdrop and Fresnel tint, the ramp reaches up to SEAM_HI_RIM.
+ */
+const SEAM_LO = 0.03;
+const SEAM_HI = 0.2;
+const SEAM_HI_RIM = 0.4;
+const RIM_PX = 5;
+/**
+ * Bright streaks (rim lights, reflections) that the photo only shows at a
+ * grazing angle get stretched over the side of the model. Texels whose |nz|
+ * is below the HIGHLIGHT_NZ ramp and that are HIGHLIGHT_EXCESS brighter
+ * (luminance) than the nearby interior are replaced by the interior colour.
+ */
+const HIGHLIGHT_NZ: [number, number] = [0.4, 0.6];
+const HIGHLIGHT_EXCESS: [number, number] = [20, 50];
+/**
+ * Texels that define the interior colour: seen fairly face-on and clear of the
+ * outline. Grazing texels of a photo hold rim highlights and backdrop tint.
+ */
+const INTERIOR_NZ = 0.55;
+const INTERIOR_PX = 6;
+/** Side/top photo blend ramps on the facing component of the normal, for real photos and for synthetic backs. */
+const REAL_RAMP: [number, number] = [0.75, 0.97];
+const SYNTHETIC_RAMP: [number, number] = [0.25, 0.7];
+/** A texel counts as seen by a side/top photo within this many grid px of the outermost surface at its depth. */
+const VISIBLE_PX = 2;
+/** Smoothing of the per-row (per-column) placement of side (top) photos, in grid lines. */
+const PLACEMENT_SIGMA = 2.5;
 
 /** Atlas holding the front photo on the left and the back texture on the right. */
 export function atlasLayout(cropW: number, cropH: number, maxSize: number): AtlasLayout {
@@ -115,7 +146,11 @@ function toNormalField(interleaved: Float32Array, inside: Uint8Array, W: number,
   return { nx, ny, nz };
 }
 
-/** Front-to-back depth range of every grid row and column, used to place points in side/top photos. */
+/**
+ * Front-to-back depth range of every grid row and column, used to place points
+ * in side/top photos. Smoothed across lines so the placement does not jump
+ * from row to row with the jitter of the outline.
+ */
 function extents(zF: Float32Array, zB: Float32Array, inside: Uint8Array, W: number, H: number) {
   const rowMin = new Float32Array(H).fill(Infinity), rowMax = new Float32Array(H).fill(-Infinity);
   const colMin = new Float32Array(W).fill(Infinity), colMax = new Float32Array(W).fill(-Infinity);
@@ -130,16 +165,180 @@ function extents(zF: Float32Array, zB: Float32Array, inside: Uint8Array, W: numb
     }
   }
   const fix = (lo: Float32Array, hi: Float32Array) => {
+    const ok = new Uint8Array(lo.length);
+    for (let k = 0; k < lo.length; k++) ok[k] = Number.isFinite(lo[k]) ? 1 : 0;
+    const sLo = smoothLine(lo, ok, PLACEMENT_SIGMA);
+    const sHi = smoothLine(hi, ok, PLACEMENT_SIGMA);
     for (let k = 0; k < lo.length; k++) {
-      if (!Number.isFinite(lo[k])) {
-        lo[k] = 0;
-        hi[k] = 1;
-      }
+      lo[k] = ok[k] ? sLo[k] : 0;
+      hi[k] = ok[k] ? sHi[k] : 1;
     }
   };
   fix(rowMin, rowMax);
   fix(colMin, colMax);
   return { rowMin, rowMax, colMin, colMax };
+}
+
+/** Gaussian smoothing of a 1-D profile over its valid entries only (normalised convolution). */
+function smoothLine(v: Float32Array, valid: Uint8Array, sigma: number): Float32Array {
+  const n = v.length;
+  const out = new Float32Array(v);
+  if (sigma <= 0.01) return out;
+  const r = Math.ceil(sigma * 3);
+  for (let k = 0; k < n; k++) {
+    if (!valid[k]) continue;
+    let acc = 0;
+    let ws = 0;
+    for (let d = -r; d <= r; d++) {
+      const q = k + d;
+      if (q < 0 || q >= n || !valid[q]) continue;
+      const w = Math.exp(-(d * d) / (2 * sigma * sigma));
+      acc += v[q] * w;
+      ws += w;
+    }
+    out[k] = acc / ws;
+  }
+  return out;
+}
+
+/** Span table with its per-line extents smoothed over `sigma` lines (first and last line unchanged). */
+function smoothSpans(s: Spans, sigma: number): Spans {
+  const valid = new Uint8Array(s.count);
+  for (let k = s.first; k <= s.last; k++) valid[k] = 1;
+  const lo = smoothLine(s.lo, valid, sigma);
+  const hi = smoothLine(s.hi, valid, sigma);
+  for (let k = 0; k < s.count; k++) {
+    if (k < s.first || k > s.last) {
+      lo[k] = s.lo[k];
+      hi[k] = s.hi[k];
+    }
+  }
+  return { ...s, lo, hi };
+}
+
+type ViewKind = 'left' | 'right' | 'top';
+
+/**
+ * Which surface texels a side or top photo actually sees: a depth-binned
+ * z-buffer of the solid between the two layers, looked at from +x, -x or +y.
+ * For every line across the view direction (a grid row for side views, a
+ * column for the top view) and depth bin it stores the outermost occupied
+ * grid position.
+ */
+function outermost(kind: ViewKind, zF: Float32Array, zB: Float32Array, inside: Uint8Array, W: number, H: number) {
+  let zMin = Infinity;
+  let zMax = -Infinity;
+  for (let p = 0; p < W * H; p++) {
+    if (!inside[p]) continue;
+    zMin = Math.min(zMin, zB[p]);
+    zMax = Math.max(zMax, zF[p]);
+  }
+  if (!Number.isFinite(zMin)) zMin = zMax = 0;
+  const nb = Math.max(1, Math.ceil(zMax - zMin) + 2);
+  const lines = kind === 'top' ? W : H;
+  const best = new Float32Array(lines * nb).fill(kind === 'right' ? -Infinity : Infinity);
+  for (let j = 0; j < H; j++) {
+    for (let i = 0; i < W; i++) {
+      const p = j * W + i;
+      if (!inside[p]) continue;
+      const b0 = Math.max(0, Math.ceil(zB[p] - zMin - 0.5));
+      const b1 = Math.min(nb - 1, Math.floor(zF[p] - zMin + 0.5));
+      const line = kind === 'top' ? i : j;
+      const pos = kind === 'top' ? j : i;
+      for (let b = b0; b <= b1; b++) {
+        const k = line * nb + b;
+        if (kind === 'right' ? pos > best[k] : pos < best[k]) best[k] = pos;
+      }
+    }
+  }
+  return { zMin, nb, best };
+}
+
+/**
+ * Per-grid-pixel visibility (0..1) of one layer from a side/top view, extrapolated
+ * outside the silhouette so bilinear lookups at the outline stay sane.
+ */
+function layerVisibility(occ: ReturnType<typeof outermost>, kind: ViewKind, z: Float32Array, inside: Uint8Array, W: number, H: number): FloatField {
+  const vis = new Float32Array(W * H);
+  const wts = new Float32Array(W * H);
+  for (let j = 0; j < H; j++) {
+    for (let i = 0; i < W; i++) {
+      const p = j * W + i;
+      if (!inside[p]) continue;
+      const b = clamp(Math.round(z[p] - occ.zMin), 0, occ.nb - 1);
+      const line = kind === 'top' ? i : j;
+      const edge = occ.best[line * occ.nb + b];
+      const d = kind === 'top' ? j - edge : kind === 'right' ? edge - i : i - edge;
+      vis[p] = Number.isFinite(d) ? 1 - smoothstep(VISIBLE_PX, 2 * VISIBLE_PX, d) : 0;
+      wts[p] = 1;
+    }
+  }
+  return { width: W, height: H, data: pushPull(vis, wts, W, H, 1) };
+}
+
+/** Bilinear lookup of a grid field at every texel centre. */
+function texelField(grid: Float32Array, W: number, H: number, TW: number, TH: number): Float32Array {
+  const f = { width: W, height: H, data: grid };
+  const out = new Float32Array(TW * TH);
+  for (let y = 0; y < TH; y++) {
+    const gj = ((y + 0.5) / TH) * H - 0.5;
+    for (let x = 0; x < TW; x++) out[y * TW + x] = sampleFloat(f, ((x + 0.5) / TW) * W - 0.5, gj);
+  }
+  return out;
+}
+
+/** Layer depths with values outside the silhouette extrapolated (they are 0 there otherwise). */
+function filledDepth(z: Float32Array, inside: Uint8Array, W: number, H: number): FloatField {
+  const wts = new Float32Array(W * H);
+  for (let p = 0; p < W * H; p++) wts[p] = inside[p] ? 1 : 0;
+  return { width: W, height: H, data: pushPull(z, wts, W, H, 1) };
+}
+
+/**
+ * Normalised blur of `w` along x (`along` = 'x') or y, counting only texels where
+ * `m` is set: three box passes approximating a Gaussian of `sigma`.
+ */
+function blurAlong(w: Float32Array, m: Uint8Array, TW: number, TH: number, sigma: number, along: 'x' | 'y'): Float32Array {
+  const out = new Float32Array(w.length);
+  const r = Math.max(1, Math.round((Math.sqrt(4 * sigma * sigma + 1) - 1) / 2));
+  const lines = along === 'y' ? TW : TH;
+  const len = along === 'y' ? TH : TW;
+  const step = along === 'y' ? TW : 1;
+  let a = new Float32Array(len), b = new Float32Array(len);
+  let ta = new Float32Array(len), tb = new Float32Array(len);
+  for (let l = 0; l < lines; l++) {
+    const base = along === 'y' ? l : l * TW;
+    let any = false;
+    for (let k = 0; k < len; k++) {
+      const i = base + k * step;
+      b[k] = m[i] ? 1 : 0;
+      a[k] = m[i] ? w[i] : 0;
+      if (a[k] > 0) any = true;
+    }
+    if (!any) continue;
+    for (let pass = 0; pass < 3; pass++) {
+      boxLine(a, ta, len, r);
+      boxLine(b, tb, len, r);
+      [a, ta] = [ta, a];
+      [b, tb] = [tb, b];
+    }
+    for (let k = 0; k < len; k++) {
+      const i = base + k * step;
+      if (m[i]) out[i] = b[k] > 1e-6 ? a[k] / b[k] : 0;
+    }
+  }
+  return out;
+}
+
+/** Running-sum box filter of radius `r` over one line (zero outside). */
+function boxLine(src: Float32Array, dst: Float32Array, len: number, r: number): void {
+  let acc = 0;
+  for (let k = 0; k < Math.min(r, len); k++) acc += src[k];
+  for (let k = 0; k < len; k++) {
+    if (k + r < len) acc += src[k + r];
+    if (k - r - 1 >= 0) acc -= src[k - r - 1];
+    dst[k] = acc;
+  }
 }
 
 function lerpArr(a: Float32Array, x: number): number {
@@ -157,36 +356,64 @@ function spansOfMask(mask: ByteField): { rows: Spans; cols: Spans } | null {
   return rows && cols ? { rows, cols } : null;
 }
 
-/** Heavily blurred, detail-free version of the front colours ("what colour is the back probably?"). */
+/** Colour distance (RGB) at which a texel's weight in the tone texture drops to 1/e. */
+const TONE_SIGMA = 60;
+
+/** Per-channel blur of `small` weighted by `wts` (normalised), plus the blurred weight. */
+function weightedBlur(small: RGBAImage, wts: Float32Array, sigma: number): { rgb: Float32Array; weight: Float32Array } {
+  const { width: w, height: h } = small;
+  const n = w * h;
+  const weight = blurBuffer(wts, w, h, sigma);
+  const rgb = new Float32Array(n * 3);
+  for (let c = 0; c < 3; c++) {
+    const ch = new Float32Array(n);
+    for (let i = 0; i < n; i++) ch[i] = small.data[i * 4 + c] * wts[i];
+    const b = blurBuffer(ch, w, h, sigma);
+    for (let i = 0; i < n; i++) rgb[i * 3 + c] = weight[i] > 1e-6 ? b[i] / weight[i] : 128;
+  }
+  return { rgb, weight };
+}
+
+/**
+ * Heavily blurred, detail-free version of the front colours ("what colour is
+ * the back probably?"). Small decals, print and highlights are down-weighted
+ * against the locally dominant colour first, so they do not smear into
+ * blotches.
+ */
 function toneTexture(front: RGBAImage, mask: ByteField): RGBAImage {
   const s = 64 / Math.max(front.width, front.height);
   const w = Math.max(4, Math.round(front.width * s));
   const h = Math.max(4, Math.round(front.height * s));
+  const n = w * h;
   const small = resizeRGBA(front, w, h);
   const m = resizeByte(mask, w, h);
-  const vals = new Float32Array(w * h * 3);
-  const wts = new Float32Array(w * h);
-  for (let i = 0; i < w * h; i++) {
-    const a = m.data[i] / 255;
-    wts[i] = a;
-    for (let c = 0; c < 3; c++) vals[i * 3 + c] = small.data[i * 4 + c] * a;
+  const alpha = new Float32Array(n);
+  for (let i = 0; i < n; i++) alpha[i] = m.data[i] / 255;
+  let wts = alpha;
+  for (let pass = 0; pass < 2; pass++) {
+    const dominant = weightedBlur(small, wts, 6).rgb;
+    const next = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      let d2 = 0;
+      for (let c = 0; c < 3; c++) d2 += (small.data[i * 4 + c] - dominant[i * 3 + c]) ** 2;
+      // A small floor keeps regions without a dominant colour (e.g. two-tone boundaries) at a plain blur.
+      next[i] = alpha[i] * (0.02 + Math.exp(-d2 / (TONE_SIGMA * TONE_SIGMA)));
+    }
+    wts = next;
   }
-  const blurredW = blurBuffer(wts, w, h, 4);
+  const { rgb, weight } = weightedBlur(small, wts, 4);
   const out = createRGBA(w, h);
-  for (let c = 0; c < 3; c++) {
-    const ch = new Float32Array(w * h);
-    for (let i = 0; i < w * h; i++) ch[i] = vals[i * 3 + c];
-    const b = blurBuffer(ch, w, h, 4);
-    for (let i = 0; i < w * h; i++) out.data[i * 4 + c] = blurredW[i] > 1e-3 ? b[i] / blurredW[i] : 128;
+  for (let i = 0; i < n; i++) {
+    for (let c = 0; c < 3; c++) out.data[i * 4 + c] = weight[i] > 1e-5 ? rgb[i * 3 + c] : 128;
+    out.data[i * 4 + 3] = 255;
   }
-  for (let i = 0; i < w * h; i++) out.data[i * 4 + 3] = 255;
   return resizeRGBA(out, front.width, front.height);
 }
 
 /**
- * Bakes the texture atlas. The front half is the user's photo itself
- * (only the anti-aliased rim is cleaned), so the model matches the photo
- * pixel for pixel from the camera's viewpoint. The back half comes from a
+ * Bakes the texture atlas. The front half is the user's photo itself (only
+ * texels it sees at a grazing angle near the outline are cleaned), so the
+ * model matches the photo pixel for pixel from the camera's viewpoint. The back half comes from a
  * reference photo of the back when available. Side/top references replace
  * texels that the photo only sees at a grazing angle.
  */
@@ -239,7 +466,7 @@ export function bakeAtlas(t: TextureInput): RGBAImage {
 
   const nfFront = t.normalF ? toNormalField(t.normalF, inside, W, H) : normalField(t.zF, inside, W, H, 1);
   const nfBack = t.normalB ? toNormalField(t.normalB, inside, W, H) : normalField(t.zB, inside, W, H, -1);
-  harmoniseSeam(front, back, nfFront, nfBack, W, H);
+  harmoniseSeam(front, back, nfFront, nfBack, W, H, edgeDist, texInside);
   // The last couple of grid pixels before the outline become a near-vertical strip
   // on the model; smooth them along the outline so per-row jitter of the cut-out
   // does not turn into streaks (colours across the edge, e.g. dark outlines, stay).
@@ -248,86 +475,32 @@ export function bakeAtlas(t: TextureInput): RGBAImage {
   tangentialRimBlur(front, edgeDist, zone, Math.max(1, gridPx));
   tangentialRimBlur(back, edgeDist, zone, Math.max(1, gridPx));
 
-  const sides: { ref: TextureRef; kind: 'left' | 'right' | 'top' }[] = [];
+  const sides: SideView[] = [];
   if (t.left) sides.push({ ref: t.left, kind: 'left' });
   if (t.right) sides.push({ ref: t.right, kind: 'right' });
   if (t.top) sides.push({ ref: t.top, kind: 'top' });
   if (sides.length && t.sideBlend > 0 && spans) {
-    const ext = extents(t.zF, t.zB, inside, W, H);
-    const fields = [
+    const fields: SideField[] = [
       { img: front, z: t.zF, nf: nfFront, real: true },
       { img: back, z: t.zB, nf: nfBack, real: t.backTexture === 'reference' },
     ];
-    const px = new Float32Array(4);
-    for (const f of fields) {
-      const lo = f.real ? 0.55 : 0.25;
-      const hi = f.real ? 0.92 : 0.7;
-      const zField = { width: W, height: H, data: f.z };
-      const nxF = { width: W, height: H, data: f.nf.nx };
-      const nyF = { width: W, height: H, data: f.nf.ny };
-      const nzF = { width: W, height: H, data: f.nf.nz };
-      for (let y = 0; y < TH; y++) {
-        const gj = ((y + 0.5) / TH) * H - 0.5;
-        for (let x = 0; x < TW; x++) {
-          const i = y * TW + x;
-          if (mask.data[i] < 64) continue;
-          const gi = ((x + 0.5) / TW) * W - 0.5;
-          const nx = sampleFloat(nxF, gi, gj);
-          const ny = sampleFloat(nyF, gi, gj);
-          const nz = sampleFloat(nzF, gi, gj);
-          let wSum = Math.max(0, Math.abs(nz)) ** 2 + 0.02;
-          const o = i * 4;
-          let r = f.img.data[o] * wSum, g = f.img.data[o + 1] * wSum, b = f.img.data[o + 2] * wSum;
-          let used = false;
-          for (const s of sides) {
-            const facing = s.kind === 'right' ? nx : s.kind === 'left' ? -nx : ny;
-            const w = t.sideBlend * smoothstep(lo, hi, facing);
-            if (w <= 0) continue;
-            const z = sampleFloat(zField, gi, gj);
-            let sx: number, sy: number;
-            if (s.kind === 'top') {
-              const tt = spanT(spans.cols, x);
-              sx = spanLineAt(s.ref.cols, clamp(tt, 0, 1));
-              const [top, bottom] = spanAt(s.ref.cols, sx);
-              const zMin = lerpArr(ext.colMin, gi), zMax = lerpArr(ext.colMax, gi);
-              const v = zMax > zMin ? (z - zMin) / (zMax - zMin) : 0.5;
-              sy = top + clamp(v, 0, 1) * (bottom - top);
-            } else {
-              const tt = spanT(spans.rows, y);
-              sy = spanLineAt(s.ref.rows, clamp(tt, 0, 1));
-              const [l, rr] = spanAt(s.ref.rows, sy);
-              const zMin = lerpArr(ext.rowMin, gj), zMax = lerpArr(ext.rowMax, gj);
-              let u = zMax > zMin ? (z - zMin) / (zMax - zMin) : 0.5;
-              // Seen from the right the object's front is on the image's left, and vice versa.
-              if (s.kind === 'right') u = 1 - u;
-              sx = l + clamp(u, 0, 1) * (rr - l);
-            }
-            sampleRGBA(s.ref.image, sx, sy, px);
-            r += px[0] * w;
-            g += px[1] * w;
-            b += px[2] * w;
-            wSum += w;
-            used = true;
-          }
-          if (!used) continue;
-          f.img.data[o] = r / wSum;
-          f.img.data[o + 1] = g / wSum;
-          f.img.data[o + 2] = b / wSum;
-        }
-      }
-    }
+    blendSideViews(t, fields, sides, mask, spans, edgeDist);
   }
 
-  // Fill everything outside the silhouette so mip-mapping never pulls in background.
+  // Fill everything outside the silhouette from the final texels, so mip-mapping never
+  // pulls in background and lookups at the outline (which straddle it) do not
+  // alternate row by row between the rim texel and an older outside colour.
   const inMask = new Uint8Array(n);
   for (let i = 0; i < n; i++) inMask[i] = mask.data[i] >= 64 ? 1 : 0;
+  const frontFilled = bleedRGBA(front, inMask);
   const backFilled = bleedRGBA(back, inMask);
+  unifyRim(frontFilled, backFilled, edgeDist, texInside);
 
   const atlas = createRGBA(layout.width, layout.height);
   const blit = (src: RGBAImage, ox: number) => {
     for (let y = 0; y < TH; y++) atlas.data.set(src.data.subarray(y * TW * 4, (y + 1) * TW * 4), (y * layout.width + ox) * 4);
   };
-  blit(front, layout.front.x);
+  blit(frontFilled, layout.front.x);
   blit(backFilled, layout.back.x);
   // Gutter: extend the edge columns of both halves.
   for (let y = 0; y < TH; y++) {
@@ -344,36 +517,42 @@ export function bakeAtlas(t: TextureInput): RGBAImage {
   return atlas;
 }
 
+/** Tangent of the outline (unit vector) for texels within `zone` px inside it, or null elsewhere. */
+function rimTangents(edgeDist: Float32Array, TW: number, TH: number, zone: number): (x: number, y: number) => [number, number] | null {
+  const field = { width: TW, height: TH, data: blurBuffer(edgeDist, TW, TH, 1.5) };
+  return (x, y) => {
+    const e = edgeDist[y * TW + x];
+    if (x < 1 || y < 1 || x >= TW - 1 || y >= TH - 1 || e <= 0 || e > zone) return null;
+    const gx = sampleFloat(field, x + 1, y) - sampleFloat(field, x - 1, y);
+    const gy = sampleFloat(field, x, y + 1) - sampleFloat(field, x, y - 1);
+    const gl = Math.hypot(gx, gy);
+    return gl < 1e-3 ? null : [-gy / gl, gx / gl];
+  };
+}
+
+const RIM_TAPS = [-3, -2, -1, 0, 1, 2, 3];
+const RIM_WEIGHTS = RIM_TAPS.map((t) => Math.exp(-(t * t) / 4.5));
+
 /** Blur texels within `zone` px of the outline along the outline's tangent only. */
 function tangentialRimBlur(img: RGBAImage, edgeDist: Float32Array, zone: number, sigma: number): void {
   const { width: TW, height: TH } = img;
-  const d = blurBuffer(edgeDist, TW, TH, 1.5);
-  const field = { width: TW, height: TH, data: d };
-  const src = new Uint8ClampedArray(img.data);
-  const srcImg: RGBAImage = { width: TW, height: TH, data: src };
+  const tangent = rimTangents(edgeDist, TW, TH, zone);
+  const srcImg: RGBAImage = { width: TW, height: TH, data: new Uint8ClampedArray(img.data) };
   const px = new Float32Array(4);
-  const taps = [-3, -2, -1, 0, 1, 2, 3];
-  const weights = taps.map((t) => Math.exp(-(t * t) / 4.5));
   for (let y = 1; y < TH - 1; y++) {
     for (let x = 1; x < TW - 1; x++) {
-      const e = edgeDist[y * TW + x];
-      if (e <= 0 || e > zone) continue;
-      const gx = sampleFloat(field, x + 1, y) - sampleFloat(field, x - 1, y);
-      const gy = sampleFloat(field, x, y + 1) - sampleFloat(field, x, y - 1);
-      const gl = Math.hypot(gx, gy);
-      if (gl < 1e-3) continue;
-      const tx = -gy / gl;
-      const ty = gx / gl;
+      const tv = tangent(x, y);
+      if (!tv) continue;
       let r = 0, g = 0, b = 0, ws = 0;
-      for (let k = 0; k < taps.length; k++) {
-        const off = (taps[k] * sigma) / 1.5;
-        sampleRGBA(srcImg, x + tx * off, y + ty * off, px);
-        r += px[0] * weights[k];
-        g += px[1] * weights[k];
-        b += px[2] * weights[k];
-        ws += weights[k];
+      for (let k = 0; k < RIM_TAPS.length; k++) {
+        const off = (RIM_TAPS[k] * sigma) / 1.5;
+        sampleRGBA(srcImg, x + tv[0] * off, y + tv[1] * off, px);
+        r += px[0] * RIM_WEIGHTS[k];
+        g += px[1] * RIM_WEIGHTS[k];
+        b += px[2] * RIM_WEIGHTS[k];
+        ws += RIM_WEIGHTS[k];
       }
-      const w = 1 - smoothstep(zone * 0.5, zone, e);
+      const w = 1 - smoothstep(zone * 0.5, zone, edgeDist[y * TW + x]);
       const o = (y * TW + x) * 4;
       img.data[o] += (r / ws - img.data[o]) * w;
       img.data[o + 1] += (g / ws - img.data[o + 1]) * w;
@@ -382,48 +561,348 @@ function tangentialRimBlur(img: RGBAImage, edgeDist: Float32Array, zone: number,
   }
 }
 
-/** Low-frequency copy of a texture (blurred at reduced resolution, then upsampled). */
-function softCopy(img: RGBAImage): RGBAImage {
-  const s = 192 / Math.max(img.width, img.height);
-  if (s >= 1) return img;
+/**
+ * Low-frequency colours of the texels marked `ok`, extended smoothly over the
+ * rest of the texture (filled and blurred at reduced resolution, then upsampled).
+ */
+function softInterior(img: RGBAImage, ok: Uint8Array): RGBAImage {
+  const s = Math.min(1, 192 / Math.max(img.width, img.height));
   const w = Math.max(4, Math.round(img.width * s));
   const h = Math.max(4, Math.round(img.height * s));
-  const small = resizeRGBA(img, w, h);
+  const n = img.width * img.height;
+  const field = (data: Float32Array) => resizeFloat({ width: img.width, height: img.height, data }, w, h).data;
+  const cover = field(Float32Array.from(ok));
+  const vals = new Float32Array(w * h * 3);
+  const wts = new Float32Array(w * h);
+  for (let c = 0; c < 3; c++) {
+    const ch = new Float32Array(n);
+    for (let i = 0; i < n; i++) ch[i] = ok[i] ? img.data[i * 4 + c] : 0;
+    const small = field(ch);
+    for (let k = 0; k < w * h; k++) vals[k * 3 + c] = cover[k] > 0 ? small[k] / cover[k] : 0;
+  }
+  for (let k = 0; k < w * h; k++) wts[k] = Math.min(1, cover[k] * 2);
+  const filled = pushPull(vals, wts, w, h, 3);
+  const out = createRGBA(w, h);
   for (let c = 0; c < 3; c++) {
     const ch = new Float32Array(w * h);
-    for (let i = 0; i < w * h; i++) ch[i] = small.data[i * 4 + c];
+    for (let k = 0; k < w * h; k++) ch[k] = filled[k * 3 + c];
     const b = blurBuffer(ch, w, h, 1.5);
-    for (let i = 0; i < w * h; i++) small.data[i * 4 + c] = b[i];
+    for (let k = 0; k < w * h; k++) out.data[k * 4 + c] = b[k];
   }
-  return resizeRGBA(small, img.width, img.height);
+  for (let k = 0; k < w * h; k++) out.data[k * 4 + 3] = 255;
+  return resizeRGBA(out, img.width, img.height);
+}
+
+/**
+ * Luminance of the nearest `ok` texels, extended over the rest of the texture
+ * at full resolution, taking the brightest within `r` px so a bright region
+ * next to a dark one (a label's edge) is its own reference.
+ */
+function interiorLuminance(img: RGBAImage, ok: Uint8Array, r: number): Float32Array {
+  const { width: TW, height: TH } = img;
+  const n = TW * TH;
+  const vals = new Float32Array(n);
+  const wts = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    if (!ok[i]) continue;
+    vals[i] = luma(img.data, i * 4);
+    wts[i] = 1;
+  }
+  return maxFilter(pushPull(vals, wts, TW, TH, 1), TW, TH, r);
+}
+
+function luma(d: Uint8ClampedArray, o: number): number {
+  return 0.299 * d[o] + 0.587 * d[o + 1] + 0.114 * d[o + 2];
+}
+
+/** Separable square maximum filter of radius `r`. */
+function maxFilter(v: Float32Array, w: number, h: number, r: number): Float32Array {
+  const tmp = new Float32Array(v.length);
+  const out = new Float32Array(v.length);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      let m = v[row + x];
+      const hi = Math.min(w - 1, x + r);
+      for (let d = Math.max(0, x - r); d <= hi; d++) if (v[row + d] > m) m = v[row + d];
+      tmp[row + x] = m;
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    const lo = Math.max(0, y - r);
+    const hi = Math.min(h - 1, y + r);
+    for (let x = 0; x < w; x++) {
+      let m = tmp[y * w + x];
+      for (let d = lo; d <= hi; d++) if (tmp[d * w + x] > m) m = tmp[d * w + x];
+      out[y * w + x] = m;
+    }
+  }
+  return out;
+}
+
+/** Separable [1 2 1] / 4 smoothing (clamp to edge). */
+function smooth3(v: Float32Array, w: number, h: number): Float32Array {
+  const tmp = new Float32Array(v.length);
+  const out = new Float32Array(v.length);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) tmp[row + x] = (v[row + Math.max(0, x - 1)] + 2 * v[row + x] + v[row + Math.min(w - 1, x + 1)]) / 4;
+  }
+  for (let y = 0; y < h; y++) {
+    const up = Math.max(0, y - 1) * w;
+    const down = Math.min(h - 1, y + 1) * w;
+    for (let x = 0; x < w; x++) out[y * w + x] = (tmp[up + x] + 2 * tmp[y * w + x] + tmp[down + x]) / 4;
+  }
+  return out;
+}
+
+/** Texels clear of the outline and seen fairly face-on; the criteria relax step by step when too few qualify (thin or edge-on objects). */
+function interiorTexels(absNz: Float32Array, edgeDist: Float32Array, texInside: Uint8Array, band: number): Uint8Array {
+  const n = absNz.length;
+  const tries: [number, number][] = [
+    [band, INTERIOR_NZ],
+    [band, 0],
+    [1.5, 0],
+    [0, 0],
+  ];
+  for (const [minDist, minNz] of tries) {
+    const ok = new Uint8Array(n);
+    let count = 0;
+    for (let i = 0; i < n; i++) {
+      if (texInside[i] && edgeDist[i] > minDist && absNz[i] > minNz) {
+        ok[i] = 1;
+        count++;
+      }
+    }
+    if (count >= 16) return ok;
+  }
+  return new Uint8Array(texInside);
 }
 
 /**
  * Where the surface turns away from the camera the photo has almost no pixels,
  * so the outermost colours get stretched into streaks, and front and back
  * textures meet with a hard seam. Fade both halves towards the same smooth
- * average there. Only texels the camera sees at a grazing angle (a few pixels
- * at the outline) are touched.
+ * interior colour there. Only texels the camera sees at a grazing angle are
+ * touched: the outermost few pixels, plus bright streaks (rim lights) a little
+ * further in. The interior colour comes from texels seen fairly face-on and
+ * clear of the outline only, because a photo's grazing rim holds rim
+ * highlights, Fresnel reflections and backdrop tint.
  */
-function harmoniseSeam(front: RGBAImage, back: RGBAImage, nfF: NormalField, nfB: NormalField, W: number, H: number): void {
+function harmoniseSeam(
+  front: RGBAImage,
+  back: RGBAImage,
+  nfF: NormalField,
+  nfB: NormalField,
+  W: number,
+  H: number,
+  edgeDist: Float32Array,
+  texInside: Uint8Array,
+): void {
   const TW = front.width;
   const TH = front.height;
-  const softF = softCopy(front);
-  const softB = softCopy(back);
+  const n = TW * TH;
   const fz = { width: W, height: H, data: nfF.nz };
   const bz = { width: W, height: H, data: nfB.nz };
+  const azF = new Float32Array(n);
+  const azB = new Float32Array(n);
   for (let y = 0; y < TH; y++) {
     const gj = ((y + 0.5) / TH) * H - 0.5;
     for (let x = 0; x < TW; x++) {
       const gi = ((x + 0.5) / TW) * W - 0.5;
-      const wf = 1 - smoothstep(0.03, 0.2, Math.abs(sampleFloat(fz, gi, gj)));
-      const wb = 1 - smoothstep(0.03, 0.2, Math.abs(sampleFloat(bz, gi, gj)));
-      if (wf <= 0 && wb <= 0) continue;
-      const o = (y * TW + x) * 4;
-      for (let c = 0; c < 3; c++) {
-        const avg = (softF.data[o + c] + softB.data[o + c]) / 2;
-        front.data[o + c] += (avg - front.data[o + c]) * wf;
-        back.data[o + c] += (avg - back.data[o + c]) * wb;
+      azF[y * TW + x] = Math.abs(sampleFloat(fz, gi, gj));
+      azB[y * TW + x] = Math.abs(sampleFloat(bz, gi, gj));
+    }
+  }
+  const scale = Math.max(1, Math.max(TW, TH) / 1024);
+  const okF = interiorTexels(azF, edgeDist, texInside, INTERIOR_PX * scale);
+  const okB = interiorTexels(azB, edgeDist, texInside, INTERIOR_PX * scale);
+  const softF = softInterior(front, okF);
+  const softB = softInterior(back, okB);
+  suppressHighlights(front, softF, interiorLuminance(front, okF, Math.round(3 * scale)), azF);
+  suppressHighlights(back, softB, interiorLuminance(back, okB, Math.round(3 * scale)), azB);
+  const rimPx = RIM_PX * scale;
+  for (let i = 0; i < n; i++) {
+    const hi = SEAM_HI_RIM + (SEAM_HI - SEAM_HI_RIM) * smoothstep(rimPx * 0.6, rimPx, edgeDist[i]);
+    const wf = 1 - smoothstep(SEAM_LO, hi, azF[i]);
+    const wb = 1 - smoothstep(SEAM_LO, hi, azB[i]);
+    if (wf <= 0 && wb <= 0) continue;
+    const o = i * 4;
+    for (let c = 0; c < 3; c++) {
+      const avg = (softF.data[o + c] + softB.data[o + c]) / 2;
+      front.data[o + c] += (avg - front.data[o + c]) * wf;
+      back.data[o + c] += (avg - back.data[o + c]) * wb;
+    }
+  }
+}
+
+/** Replace grazing texels much brighter than the nearby interior by the interior colour. */
+function suppressHighlights(img: RGBAImage, soft: RGBAImage, interiorLum: Float32Array, absNz: Float32Array): void {
+  const { width: TW, height: TH } = img;
+  const n = TW * TH;
+  const excess = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    if (absNz[i] < HIGHLIGHT_NZ[1]) excess[i] = Math.max(0, luma(img.data, i * 4) - interiorLum[i]);
+  }
+  // Pixel noise and fine print stay below the threshold once averaged a little; streaks do not.
+  const e = smooth3(excess, TW, TH);
+  const hit = new Float32Array(n);
+  for (let i = 0; i < n; i++) hit[i] = smoothstep(HIGHLIGHT_EXCESS[0], HIGHLIGHT_EXCESS[1], e[i]);
+  // Widen each detection by a couple of pixels so the soft flanks of a streak go too.
+  const grown = maxFilter(hit, TW, TH, 2);
+  for (let i = 0; i < n; i++) {
+    const w = (1 - smoothstep(HIGHLIGHT_NZ[0], HIGHLIGHT_NZ[1], absNz[i])) * grown[i];
+    if (w <= 0) continue;
+    const o = i * 4;
+    for (let c = 0; c < 3; c++) img.data[o + c] += (soft.data[o + c] - img.data[o + c]) * w;
+  }
+}
+
+/**
+ * The side wall carries the outermost texel of each half, front on one side of
+ * its middle line and back on the other. Give both halves the same colour
+ * there (and just outside, where bilinear lookups at the outline reach) so the
+ * wall reads as one colour instead of a thin line.
+ */
+function unifyRim(front: RGBAImage, back: RGBAImage, edgeDist: Float32Array, texInside: Uint8Array): void {
+  const { width: TW, height: TH } = front;
+  const n = TW * TH;
+  const outside = new Uint8Array(n);
+  for (let i = 0; i < n; i++) outside[i] = texInside[i] ? 0 : 1;
+  const outDist = distanceTransform(outside, TW, TH).data;
+  for (let i = 0; i < n; i++) {
+    const w = texInside[i] ? 1 - smoothstep(1.5, 2.5, edgeDist[i]) : outDist[i] <= 2.5 ? 1 : 0;
+    if (w <= 0) continue;
+    const o = i * 4;
+    for (let c = 0; c < 3; c++) {
+      const avg = (front.data[o + c] + back.data[o + c]) / 2;
+      front.data[o + c] += (avg - front.data[o + c]) * w;
+      back.data[o + c] += (avg - back.data[o + c]) * w;
+    }
+  }
+}
+
+interface SideView {
+  ref: TextureRef;
+  kind: ViewKind;
+}
+
+interface SideField {
+  img: RGBAImage;
+  z: Float32Array;
+  nf: NormalField;
+  /** A real photo (front, back reference) rather than a synthetic back. */
+  real: boolean;
+}
+
+/**
+ * Side and top references replace texels that the photo only sees at a
+ * grazing angle and that the reference itself sees (nothing in front of
+ * them along its view direction). Placement and weights are smoothed along
+ * the outline so rows do not alternate between sources.
+ */
+function blendSideViews(
+  t: TextureInput,
+  fields: SideField[],
+  sides: SideView[],
+  mask: ByteField,
+  spans: { rows: Spans; cols: Spans },
+  edgeDist: Float32Array,
+): void {
+  const { gridW: W, gridH: H, inside } = t;
+  const TW = mask.width;
+  const TH = mask.height;
+  const n = TW * TH;
+  const rimRamp = 2.5 * Math.max(1, TW / W);
+  const mid = new Float32Array(W * H);
+  for (let p = 0; p < W * H; p++) mid[p] = (t.zF[p] + t.zB[p]) / 2;
+  const midTex = texelField(blurBuffer(filledDepth(mid, inside, W, H).data, W, H, 1.5), W, H, TW, TH);
+  const ext = extents(t.zF, t.zB, inside, W, H);
+  const on = new Uint8Array(n);
+  for (let i = 0; i < n; i++) on[i] = mask.data[i] >= 64 ? 1 : 0;
+  const occ = new Map<ViewKind, ReturnType<typeof outermost>>();
+  for (const s of sides) occ.set(s.kind, outermost(s.kind, t.zF, t.zB, inside, W, H));
+  // Reference spans smoothed over the same number of object lines as the model's extents.
+  const refSpans = sides.map((s) => {
+    const top = s.kind === 'top';
+    const own = top ? spans.cols : spans.rows;
+    const ref = top ? s.ref.cols : s.ref.rows;
+    const linesPerGrid = ((top ? TW / W : TH / H) * (ref.last - ref.first)) / Math.max(1, own.last - own.first);
+    return smoothSpans(ref, PLACEMENT_SIGMA * Math.max(1, linesPerGrid));
+  });
+  const px = new Float32Array(4);
+  for (const f of fields) {
+    const [lo, hi] = f.real ? REAL_RAMP : SYNTHETIC_RAMP;
+    // Depth per texel for placing it in the side photo. The grid's depth steps from
+    // row to row along the outline (the mesh snaps those vertices onto the cut-out,
+    // the grid does not), which would put whole rows on different side-photo
+    // columns: blur it, and near the outline follow the true distance to it, so
+    // both layers meet on the middle line there.
+    const zTex = texelField(blurBuffer(filledDepth(f.z, inside, W, H).data, W, H, 1.5), W, H, TW, TH);
+    for (let i = 0; i < n; i++) zTex[i] = midTex[i] + (zTex[i] - midTex[i]) * Math.min(1, edgeDist[i] / rimRamp);
+    const nxF = { width: W, height: H, data: f.nf.nx };
+    const nyF = { width: W, height: H, data: f.nf.ny };
+    const nzF = { width: W, height: H, data: f.nf.nz };
+    const weights = sides.map((s) => {
+      const vis = layerVisibility(occ.get(s.kind)!, s.kind, f.z, inside, W, H);
+      const w = new Float32Array(n);
+      for (let y = 0; y < TH; y++) {
+        const gj = ((y + 0.5) / TH) * H - 0.5;
+        for (let x = 0; x < TW; x++) {
+          const i = y * TW + x;
+          if (!on[i]) continue;
+          const gi = ((x + 0.5) / TW) * W - 0.5;
+          const facing = s.kind === 'right' ? sampleFloat(nxF, gi, gj) : s.kind === 'left' ? -sampleFloat(nxF, gi, gj) : sampleFloat(nyF, gi, gj);
+          w[i] = t.sideBlend * smoothstep(lo, hi, facing) * clamp(sampleFloat(vis, gi, gj), 0, 1);
+        }
+      }
+      // Side photos are placed row by row, the top photo column by column.
+      return blurAlong(w, on, TW, TH, PLACEMENT_SIGMA * (s.kind === 'top' ? TW / W : TH / H), s.kind === 'top' ? 'x' : 'y');
+    });
+    for (let y = 0; y < TH; y++) {
+      const gj = ((y + 0.5) / TH) * H - 0.5;
+      for (let x = 0; x < TW; x++) {
+        const i = y * TW + x;
+        if (!on[i]) continue;
+        const gi = ((x + 0.5) / TW) * W - 0.5;
+        const nz = sampleFloat(nzF, gi, gj);
+        let wSum = nz * nz + 0.02;
+        const o = i * 4;
+        let r = f.img.data[o] * wSum, g = f.img.data[o + 1] * wSum, b = f.img.data[o + 2] * wSum;
+        let used = false;
+        for (let k = 0; k < sides.length; k++) {
+          const w = weights[k][i];
+          if (w <= 1e-4) continue;
+          const s = sides[k];
+          const ref = refSpans[k];
+          const z = zTex[i];
+          let sx: number, sy: number;
+          if (s.kind === 'top') {
+            sx = spanLineAt(ref, clamp(spanT(spans.cols, x), 0, 1));
+            const [top, bottom] = spanAt(ref, sx);
+            const zMin = lerpArr(ext.colMin, gi), zMax = lerpArr(ext.colMax, gi);
+            const v = zMax > zMin ? (z - zMin) / (zMax - zMin) : 0.5;
+            sy = top + clamp(v, 0, 1) * (bottom - top);
+          } else {
+            sy = spanLineAt(ref, clamp(spanT(spans.rows, y), 0, 1));
+            const [l, rr] = spanAt(ref, sy);
+            const zMin = lerpArr(ext.rowMin, gj), zMax = lerpArr(ext.rowMax, gj);
+            let u = zMax > zMin ? (z - zMin) / (zMax - zMin) : 0.5;
+            // Seen from the right the object's front is on the image's left, and vice versa.
+            if (s.kind === 'right') u = 1 - u;
+            sx = l + clamp(u, 0, 1) * (rr - l);
+          }
+          sampleRGBA(s.ref.image, sx, sy, px);
+          r += px[0] * w;
+          g += px[1] * w;
+          b += px[2] * w;
+          wSum += w;
+          used = true;
+        }
+        if (!used) continue;
+        f.img.data[o] = r / wSum;
+        f.img.data[o + 1] = g / wSum;
+        f.img.data[o + 2] = b / wSum;
       }
     }
   }

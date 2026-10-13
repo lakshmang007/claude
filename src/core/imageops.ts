@@ -191,6 +191,13 @@ export function resizeRGBA(img: RGBAImage, width: number, height: number): RGBAI
   return out;
 }
 
+/** Reduce an image so its longest side is at most `max` (keeps memory in check for huge photos). */
+export function limitSize(img: RGBAImage, max: number): RGBAImage {
+  const s = max / Math.max(img.width, img.height);
+  if (s >= 1) return img;
+  return resizeRGBA(img, Math.max(1, Math.round(img.width * s)), Math.max(1, Math.round(img.height * s)));
+}
+
 /** Resize a byte field (masks) with area averaging / bilinear upsampling. */
 export function resizeByte(f: ByteField, width: number, height: number): ByteField {
   const asFloat: FloatField = { width: f.width, height: f.height, data: Float32Array.from(f.data) };

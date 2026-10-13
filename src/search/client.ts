@@ -19,16 +19,19 @@ export interface SearchResponse {
   providers: { id: string; label: string }[];
 }
 
+// Page-relative, so a build hosted under a sub-path never calls whatever the host serves at its root /api.
 export async function searchReferences(q: string, views = true): Promise<SearchResponse> {
-  const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&views=${views ? 1 : 0}`);
+  const res = await fetch(`api/search?q=${encodeURIComponent(q)}&views=${views ? 1 : 0}`);
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error || `Search failed (${res.status})`);
+  // A static host answers unknown paths with its own page; that is not a search API.
+  if (!Array.isArray(body.results)) throw new Error('The search API is not available here');
   return body as SearchResponse;
 }
 
 export async function apiHealth(): Promise<{ ok: boolean; providers: { id: string; label: string }[] } | null> {
   try {
-    const res = await fetch('/api/health');
+    const res = await fetch('api/health');
     return res.ok ? await res.json() : null;
   } catch {
     return null;
@@ -38,13 +41,15 @@ export async function apiHealth(): Promise<{ ok: boolean; providers: { id: strin
 /** Same-origin URL for a remote image, so its pixels can be read from a canvas. */
 export function proxied(url: string): string {
   if (url.startsWith('data:') || url.startsWith('blob:')) return url;
+  // Relative paths are the app's own files (bundled samples). Kept relative so a build hosted under a sub-path still finds them.
+  if (!/^([a-z][a-z\d+.-]*:|\/\/)/i.test(url)) return url;
   try {
     const u = new URL(url, location.href);
     if (u.origin === location.origin) return u.toString();
   } catch {
     // not a URL; let the server reject it
   }
-  return `/api/image?url=${encodeURIComponent(url)}`;
+  return `api/image?url=${encodeURIComponent(url)}`;
 }
 
 /** Links for searching in the user's own browser; dropped images come back via drag & drop. */

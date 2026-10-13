@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import fs from 'node:fs/promises';
-import { vasePhoto } from './fixtures';
+import { expectToolbarClickable, vasePhoto } from './fixtures';
 
 const dataUrl = (buf: Buffer) => `data:image/png;base64,${buf.toString('base64')}`;
 
@@ -22,6 +22,8 @@ async function upload(page: Page) {
 }
 
 test('photo + web reference views -> watertight textured model and exports (classical pipeline)', async ({ page }) => {
+  // Software WebGL plus four exports: close to the default timeout when the CPU is shared.
+  test.slow();
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await mockSearch(page, true);
@@ -32,7 +34,7 @@ test('photo + web reference views -> watertight textured model and exports (clas
 
   await page.click('#generate-btn');
   await expect(page.locator('#stats')).toContainText('watertight', { timeout: 90_000 });
-  await expect(page.locator('#stats')).toContainText('web views: back');
+  await expect(page.locator('#stats')).toContainText('reference views: back');
   await expect(page.locator('.slot[data-view="back"]')).toHaveClass(/filled/);
   await page.waitForTimeout(800);
   await page.screenshot({ path: 'test-results/01-model.png' });
@@ -106,7 +108,18 @@ test('layout works on a phone-sized screen', async ({ page }) => {
   await page.goto('/?ai=0');
   await upload(page);
   await expect(page.locator('#photo-info')).toContainText('colour key');
-  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-  expect(overflow).toBeLessThanOrEqual(0);
+  await page.click('#generate-btn');
+  await expect(page.locator('#stats')).toContainText('watertight', { timeout: 90_000 });
+  for (const width of [390, 360]) {
+    await page.setViewportSize({ width, height: 800 });
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+    await expectToolbarClickable(page);
+    // Nothing covers the model: the toolbar and stats sit above the 3D view, the export bar below it.
+    const view = (await page.locator('#viewer').boundingBox())!;
+    expect((await page.locator('#stats').boundingBox())!.y + (await page.locator('#stats').boundingBox())!.height).toBeLessThanOrEqual(view.y + 1);
+    expect((await page.locator('#exports').boundingBox())!.y).toBeGreaterThanOrEqual(view.y + view.height - 1);
+    expect(view.height).toBeGreaterThan(300);
+  }
   await page.screenshot({ path: 'test-results/04-mobile.png', fullPage: true });
 });

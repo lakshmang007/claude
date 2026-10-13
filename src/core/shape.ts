@@ -8,28 +8,336 @@ export interface Silhouette {
   width: number;
   height: number;
   inside: Uint8Array;
-  /** Distance from each pixel centre to the silhouette edge (grid px, >= 0.5 inside). */
+  /**
+   * Distance from each pixel centre to the silhouette edge (grid px, >= 0.5 inside).
+   * Cap outlines do not count: near a flat end this is the distance to the walls.
+   */
   dist: Float32Array;
   /** Balloon height (grid px): circular cross-sections, a hemisphere for a disc. */
   infl: Float32Array;
   /** Smooth local cross-section radius (grid px). */
   radius: Float32Array;
+  /** Flat ends whose outline is a reflective (Neumann) boundary of the inflation. */
+  caps: Cap[];
+}
+
+/**
+ * A flat end of the object seen edge-on (bottle base, cap top). Its outline is
+ * where a flat face meets the photo, not where the surface turns away from the
+ * camera, so the front and back keep their full height up to it.
+ */
+export interface Cap {
+  side: 'top' | 'bottom';
+  /** First and last grid column whose end outline belongs to the flat face. */
+  x0: number;
+  x1: number;
+  /** Outermost and innermost end row over those columns (a disc seen at an angle curves). */
+  outer: number;
+  inner: number;
+}
+
+/** A cap in some raster's own columns: [c0, c1). */
+export interface CapSpan {
+  side: 'top' | 'bottom';
+  c0: number;
+  c1: number;
+}
+
+/** Steepest outline slope (tan 15°) still counted as part of a flat end. */
+const CAP_SLOPE = Math.tan((15 * Math.PI) / 180);
+
+/** Row of the lowest (bottom) or highest (top) object pixel in column `x`, -1 if none. */
+function endRow(inside: Uint8Array, W: number, H: number, x: number, bottom: boolean): number {
+  for (let k = 0; k < H; k++) {
+    const y = bottom ? H - 1 - k : k;
+    if (inside[y * W + x]) return y;
+  }
+  return -1;
+}
+
+/**
+ * Sub-pixel outline position (grid rows, continuous) at the top or bottom end of
+ * every column, from the full-resolution cut-out when given; NaN for empty columns.
+ */
+function endProfile(inside: Uint8Array, W: number, H: number, side: Cap['side'], mask?: ByteField): { ext: Int32Array; y: Float32Array } {
+  const ext = new Int32Array(W);
+  const y = new Float32Array(W).fill(NaN);
+  const bottom = side === 'bottom';
+  const mw = mask?.width ?? 0;
+  const mh = mask?.height ?? 0;
+  const sx = mw / W;
+  const sy = mh / H;
+  const a = (X: number, Y: number) => (Y < 0 || Y >= mh ? 0 : mask!.data[Y * mw + X] / 255);
+  for (let i = 0; i < W; i++) {
+    ext[i] = endRow(inside, W, H, i, bottom);
+    if (ext[i] < 0) continue;
+    y[i] = bottom ? ext[i] + 1 : ext[i];
+    if (!mask) continue;
+    const lo = Math.max(0, Math.floor((ext[i] - 2) * sy));
+    const hi = Math.min(mh - 1, Math.ceil((ext[i] + 3) * sy));
+    const X0 = Math.floor(i * sx);
+    const X1 = Math.min(mw, Math.max(X0 + 1, Math.ceil((i + 1) * sx)));
+    let sum = 0;
+    let cnt = 0;
+    for (let X = X0; X < X1; X++) {
+      for (let k = 0; k <= hi - lo; k++) {
+        const Y = bottom ? hi - k : lo + k;
+        const a1 = a(X, Y);
+        if (a1 < 0.5) continue;
+        const a0 = a(X, bottom ? Y + 1 : Y - 1);
+        const t = clamp((a1 - 0.5) / Math.max(1e-3, a1 - a0), 0, 1);
+        sum += bottom ? Y + 0.5 + t : Y + 0.5 - t;
+        cnt++;
+        break;
+      }
+    }
+    if (cnt) y[i] = sum / cnt / sy;
+  }
+  return { ext, y };
+}
+
+/** The connected run of object pixels in `row` that contains column `col`. */
+function rowRun(inside: Uint8Array, W: number, row: number, col: number): [number, number] | null {
+  if (!inside[row * W + col]) return null;
+  let l = col;
+  let r = col;
+  while (l > 0 && inside[row * W + l - 1]) l--;
+  while (r < W - 1 && inside[row * W + r + 1]) r++;
+  return [l, r];
+}
+
+/**
+ * Finds flat ends at the top and bottom of the silhouette: a long, straight or
+ * shallow (a flat disc seen from a little above or below) stretch of outline
+ * whose normal stays within 15° of vertical, closed off by walls that rise
+ * straight from it for at least half its width. Discs, balls and organic
+ * curves never have such walls; a lying bar's walls are too short.
+ */
+export function detectCaps(inside: Uint8Array, W: number, H: number, mask?: ByteField): Cap[] {
+  const caps: Cap[] = [];
+  const minLen = Math.max(6, 0.03 * Math.max(W, H));
+  for (const side of ['top', 'bottom'] as const) {
+    const { ext, y } = endProfile(inside, W, H, side, mask);
+    // Rows grow outwards at the bottom, inwards at the top.
+    const out = side === 'bottom' ? 1 : -1;
+    const linked = (i: number) => i > 0 && ext[i] >= 0 && ext[i - 1] >= 0 && Math.abs(y[i] - y[i - 1]) <= 1;
+    const slope = (i: number) => {
+      for (let k = 2; k >= 1; k--) {
+        if (i - k < 0 || i + k >= W) continue;
+        let ok = true;
+        for (let t = i - k + 1; t <= i + k && ok; t++) ok = linked(t);
+        if (ok) return (y[i + k] - y[i - k]) / (2 * k);
+      }
+      return Infinity;
+    };
+    const flat = new Uint8Array(W);
+    for (let i = 0; i < W; i++) flat[i] = ext[i] >= 0 && Math.abs(slope(i)) <= CAP_SLOPE ? 1 : 0;
+    for (let a = 0; a < W; a++) {
+      if (!flat[a]) continue;
+      let b = a;
+      while (b + 1 < W && flat[b + 1] && linked(b + 1)) b++;
+      const cap = qualifyCap(inside, W, H, side, out, ext, y, a, b, minLen);
+      if (cap) caps.push(cap);
+      a = b;
+    }
+  }
+  return caps;
+}
+
+function qualifyCap(
+  inside: Uint8Array,
+  W: number,
+  H: number,
+  side: Cap['side'],
+  out: number,
+  ext: Int32Array,
+  y: Float32Array,
+  a: number,
+  b: number,
+  minLen: number,
+): Cap | null {
+  const L = b - a + 1;
+  if (L < minLen) return null;
+  // Straight, or the shallow arc of a flat disc seen slightly from above or below.
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (let i = a; i <= b; i++) {
+    sx += i;
+    sy += y[i];
+    sxx += i * i;
+    sxy += i * y[i];
+  }
+  const m = (L * sxy - sx * sy) / Math.max(1e-9, L * sxx - sx * sx);
+  const c = (sy - m * sx) / L;
+  let rMin = Infinity, rMax = -Infinity;
+  for (let i = a; i <= b; i++) {
+    const r = y[i] - (c + m * i);
+    rMin = Math.min(rMin, r);
+    rMax = Math.max(rMax, r);
+  }
+  if (rMax - rMin > Math.max(1, 0.08 * L)) return null;
+
+  // Walls: going inwards from the end, the object's width must settle within a
+  // short distance and then stay put for at least half the width.
+  const mid = Math.round((a + b) / 2);
+  let edge = ext[a];
+  for (let i = a; i <= b; i++) edge = out > 0 ? Math.max(edge, ext[i]) : Math.min(edge, ext[i]);
+  const runs: ([number, number] | null)[] = [];
+  const runAt = (k: number) => {
+    while (runs.length <= k) {
+      const row = edge - out * runs.length;
+      runs.push(row >= 0 && row < H ? rowRun(inside, W, row, mid) : null);
+    }
+    return runs[k];
+  };
+  let walls: [number, number] | null = null;
+  for (let k = 0; !walls; k++) {
+    const start = runAt(k);
+    if (!start) {
+      if (k > 2) return null;
+      continue;
+    }
+    const w = start[1] - start[0] + 1;
+    if (k > 0.3 * w) return null;
+    const h = Math.max(4, Math.ceil(0.5 * w));
+    const tol = Math.max(1.5, 0.06 * w);
+    // A handle or spout may join one wall part of the way up.
+    const ls: number[] = [];
+    const rs: number[] = [];
+    let left = true;
+    let right = true;
+    for (let j = k; j <= k + h && (left || right); j++) {
+      const run = runAt(j);
+      left &&= !!run && Math.abs(run[0] - start[0]) <= tol;
+      right &&= !!run && Math.abs(run[1] - start[1]) <= tol;
+      if (left) ls.push(run![0]);
+      if (right) rs.push(run![1]);
+    }
+    if (Math.max(ls.length, rs.length) > h && Math.min(ls.length, rs.length) > h / 3) walls = [median(ls), median(rs)];
+  }
+  const [wl, wr] = walls;
+  if (a < wl - 1 || b > wr + 1 || L < 0.3 * (wr - wl + 1)) return null;
+
+  // Extend over the steep ends of a disc seen at an angle (they follow the
+  // ellipse through the run up to the walls), but not over rounded corners.
+  const xc = (wl + wr + 1) / 2;
+  const ae = (wr + 1 - wl) / 2;
+  const g = (i: number) => 1 - Math.sqrt(Math.max(0, 1 - ((i + 0.5 - xc) / ae) ** 2));
+  // Least squares for y = c0 + c1·x + c2·g(x), the ellipse rising towards the walls.
+  const A = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+  const B = [0, 0, 0];
+  for (let i = a; i <= b; i++) {
+    const f = [1, i, -out * g(i)];
+    for (let r = 0; r < 3; r++) {
+      B[r] += f[r] * y[i];
+      for (let s = 0; s < 3; s++) A[r * 3 + s] += f[r] * f[s];
+    }
+  }
+  let coef = solve3(A, B);
+  if (!coef || coef[2] < 0) coef = [c, m, 0];
+  const model = (i: number) => coef[0] + coef[1] * i - out * coef[2] * g(i);
+  const tolE = Math.max(0.6, 0.03 * ae);
+  const fits = (i: number) => {
+    if (i < wl || i > wr || ext[i] < 0 || Number.isNaN(y[i])) return false;
+    const steep = Math.abs(model(i + 0.5) - model(i - 0.5));
+    return Math.abs(y[i] - model(i)) <= tolE + 0.5 * steep;
+  };
+  let x0 = a;
+  let x1 = b;
+  while (fits(x0 - 1)) x0--;
+  while (fits(x1 + 1)) x1++;
+  let outer = ext[x0];
+  let inner = ext[x0];
+  for (let i = x0; i <= x1; i++) {
+    outer = out > 0 ? Math.max(outer, ext[i]) : Math.min(outer, ext[i]);
+    inner = out > 0 ? Math.min(inner, ext[i]) : Math.max(inner, ext[i]);
+  }
+  return { side, x0, x1, outer, inner };
+}
+
+function median(v: number[]): number {
+  const s = [...v].sort((p, q) => p - q);
+  return s[s.length >> 1];
+}
+
+function solve3(A: number[], B: number[]): number[] | null {
+  const det = (m: number[]) =>
+    m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6]);
+  const d = det(A);
+  if (Math.abs(d) < 1e-9) return null;
+  const out: number[] = [];
+  for (let c = 0; c < 3; c++) {
+    const m = A.slice();
+    for (let r = 0; r < 3; r++) m[r * 3 + c] = B[r];
+    out.push(det(m) / d);
+  }
+  return out;
+}
+
+/**
+ * Mirrors the object across its flat ends, column by column, into a raster
+ * padded by `depth` rows at each end that has a cap. Distances and the
+ * inflation solved on this domain see a reflective (Neumann) boundary at the
+ * caps, so the shape keeps its full cross-section up to them.
+ */
+export function mirrorCaps(on: Uint8Array, w: number, h: number, caps: CapSpan[], depth: number): { data: Uint8Array; height: number; top: number } {
+  const top = caps.some((c) => c.side === 'top') ? depth : 0;
+  const height = h + top + (caps.some((c) => c.side === 'bottom') ? depth : 0);
+  const data = new Uint8Array(w * height);
+  data.set(on, top * w);
+  const isOn = (x: number, yy: number) => x >= 0 && x < w && yy >= 0 && yy < h && on[yy * w + x] !== 0;
+  for (const cap of caps) {
+    const bottom = cap.side === 'bottom';
+    const c0 = Math.max(0, cap.c0);
+    const c1 = Math.min(w, cap.c1);
+    for (let x = c0; x < c1; x++) {
+      const e = endRow(on, w, h, x, bottom);
+      if (e < 0) continue;
+      for (let k = 0; k < depth; k++) {
+        const src = bottom ? e - k : e + k;
+        const dst = bottom ? e + 1 + k : e - 1 - k;
+        if (src < 0 || src >= h || isOn(x, dst)) break;
+        // Never let the mirror touch other parts of the object beside the cap.
+        if ((x === c0 && isOn(x - 1, dst)) || (x === c1 - 1 && isOn(x + 1, dst))) break;
+        if (on[src * w + x]) data[(dst + top) * w + x] = 1;
+      }
+    }
+  }
+  return { data, height, top };
+}
+
+/** Grid rows the inflation is mirrored across a cap: enough for the reflection to act as a true Neumann boundary. */
+function capDepth(caps: Cap[], H: number): number {
+  let wMax = 0;
+  for (const c of caps) wMax = Math.max(wMax, c.x1 - c.x0 + 1);
+  return Math.min(H, Math.ceil(2 * wMax) + 2);
 }
 
 /**
  * @param fineDist optional distance-to-outline per grid pixel (grid px) measured
  *   on the full-resolution cut-out. Near the rim the circular profile is very
  *   steep, so pixel-quantised distances would print ridges into the surface.
+ *   With caps it must ignore the cap outlines as well (see mirrorCaps).
+ * @param caps flat ends; their outline is a reflective boundary.
  */
-export function analyseSilhouette(inside: Uint8Array, width: number, height: number, fineDist?: Float32Array): Silhouette {
-  const D = distanceTransform(inside, width, height);
-  const P = poissonHeight(inside, width, height);
+export function analyseSilhouette(inside: Uint8Array, width: number, height: number, fineDist?: Float32Array, caps: Cap[] = []): Silhouette {
   const n = width * height;
+  let D: Float32Array;
+  let P: Float32Array;
+  if (caps.length) {
+    const spans = caps.map((c) => ({ side: c.side, c0: c.x0, c1: c.x1 + 1 }));
+    const m = mirrorCaps(inside, width, height, spans, capDepth(caps, height));
+    const from = m.top * width;
+    D = distanceTransform(m.data, width, m.height).data.slice(from, from + n);
+    P = poissonHeight(m.data, width, m.height).slice(from, from + n);
+  } else {
+    D = distanceTransform(inside, width, height).data;
+    P = poissonHeight(inside, width, height);
+  }
   const dist = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     if (!inside[i]) continue;
     // Pixel centres of the outermost ring are half a pixel from the true edge.
-    dist[i] = fineDist ? Math.max(0.05, fineDist[i]) : Math.max(0.5, D.data[i] - 0.5);
+    dist[i] = fineDist ? Math.max(0.05, fineDist[i]) : Math.max(0.5, D[i] - 0.5);
   }
 
   // 2·sqrt(P) is exact for discs but √2 too thick for long strips (P peaks at w²/2
@@ -43,13 +351,13 @@ export function analyseSilhouette(inside: Uint8Array, width: number, height: num
     for (let x = 0; x < width; x++) {
       const i = y * width + x;
       if (!inside[i] || P[i] <= 0) continue;
-      const di = D.data[i];
+      const di = D[i];
       let ridge = true;
       for (let dy = -1; dy <= 1 && ridge; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
           const xx = x + dx;
           const yy = y + dy;
-          if ((dx || dy) && xx >= 0 && yy >= 0 && xx < width && yy < height && D.data[yy * width + xx] > di + 0.35) {
+          if ((dx || dy) && xx >= 0 && yy >= 0 && xx < width && yy < height && D[yy * width + xx] > di + 0.35) {
             ridge = false;
             break;
           }
@@ -78,7 +386,26 @@ export function analyseSilhouette(inside: Uint8Array, width: number, height: num
     const t = clamp((d - 2) / 3, 0, 1);
     infl[i] = rim + (interior - rim) * t * t * (3 - 2 * t);
   }
-  return { width, height, inside, dist, infl, radius: radiusOut };
+  return { width, height, inside, dist, infl, radius: radiusOut, caps };
+}
+
+/**
+ * How much each pixel near the outline belongs to a flat end rather than to a
+ * turning rim: 1 where the cap outline is clearly nearer than any other
+ * (the Neumann distance `s.dist` exceeds the true distance), 0 on ordinary
+ * rims, blended over a pixel where the two meet.
+ *
+ * @param trueDist signed distance to the whole outline (grid px, + inside).
+ */
+export function capWeights(s: Silhouette, trueDist: Float32Array): Float32Array {
+  const out = new Float32Array(s.width * s.height);
+  if (!s.caps.length) return out;
+  for (let i = 0; i < out.length; i++) {
+    if (!s.inside[i] || trueDist[i] >= 4) continue;
+    const t = clamp(s.dist[i] - Math.max(0, trueDist[i]) - 0.5, 0, 1);
+    out[i] = t * t * (3 - 2 * t);
+  }
+  return out;
 }
 
 /**
@@ -240,6 +567,7 @@ export function frontShape(s: Silhouette, relief: Relief | null, luminance: Floa
     // blurring it would make the rim depend on the pixel staircase of the outline.
     const ml = new Float32Array(n);
     for (let i = 0; i < n; i++) if (s.inside[i]) ml[i] = relief.rel[i] * scale * p.depthStrength;
+    holdAtCaps(ml, s);
     const mlSmooth = maskedBlur(ml, w, s.width, s.height, p.smoothing);
     for (let i = 0; i < n; i++) {
       if (!s.inside[i]) continue;
@@ -263,6 +591,24 @@ export function frontShape(s: Silhouette, relief: Relief | null, luminance: Floa
   }
   const rimSmoothed = maskedBlur(zRim, w, s.width, s.height, Math.max(1, p.smoothing));
   return { hF, zRim: rimSmoothed, infl, scale };
+}
+
+/**
+ * A depth network blends the object with the backdrop along the outline. On a
+ * rim that is harmless (the relief fades out there), but it would bend a cap's
+ * edge: there, repeat the relief found a few rows in.
+ */
+function holdAtCaps(v: Float32Array, s: Silhouette, rows = 3): void {
+  const { width: W, height: H, inside } = s;
+  for (const cap of s.caps) {
+    const out = cap.side === 'bottom' ? 1 : -1;
+    for (let x = cap.x0; x <= cap.x1; x++) {
+      const e = endRow(inside, W, H, x, out > 0);
+      const src = e - out * rows;
+      if (e < 0 || src < 0 || src >= H || !inside[src * W + x]) continue;
+      for (let k = 0; k < rows; k++) v[(e - out * k) * W + x] = v[src * W + x];
+    }
+  }
 }
 
 function meanInside(v: Float32Array, inside: Uint8Array): number {
@@ -329,6 +675,7 @@ export function backFromReference(
     w[i] = 1;
     ml[i] = Math.max(0, warped[i]) * scale * p.depthStrength;
   }
+  holdAtCaps(ml, s);
   const mlSmooth = maskedBlur(ml, w, s.width, s.height, p.smoothing);
   const hB = new Float32Array(n);
   for (let i = 0; i < n; i++) {
@@ -368,7 +715,19 @@ export function applyExtentConstraints(s: Silhouette, hF: Float32Array, hB: Floa
       if (maxT > 1e-3 && target > 0) k[line] = Math.log(clamp(target / maxT, 0.15, 6));
     }
     fillNaN(k);
-    return { axis: c.axis, logK: blurBuffer(k, lines, 1, 2) };
+    const logK = blurBuffer(k, lines, 1, 2);
+    // A side view sees a flat end as a curve too (it is a disc seen at an angle), so its
+    // extent there is not the object's depth: keep the depth found just above the end.
+    if (c.axis === 'rows') {
+      for (const cap of s.caps) {
+        const zone = 2 * Math.abs(cap.outer - cap.inner) + 2;
+        const from = cap.side === 'bottom' ? cap.inner - zone : cap.inner + zone;
+        if (from < 0 || from >= lines) continue;
+        if (cap.side === 'bottom') for (let r = from + 1; r < lines; r++) logK[r] = logK[from];
+        else for (let r = from - 1; r >= 0; r--) logK[r] = logK[from];
+      }
+    }
+    return { axis: c.axis, logK };
   });
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -478,9 +837,15 @@ export function rimOffsets(s: Silhouette, mask: ByteField): { offset: Float32Arr
  * outline, like the outermost ring sits exactly on it.
  *
  * Returns per-pixel offsets (to add to the rim offsets) and the vertices'
- * new distance to the outline.
+ * new distance to the outline; where `capW` marks a cap, to the walls
+ * (`wallDist`: signed distance that ignores cap outlines).
  */
-export function ringOffsets(s: Silhouette, signedDist: Float32Array): { offset: Float32Array; dist: Float32Array } {
+export function ringOffsets(
+  s: Silhouette,
+  signedDist: Float32Array,
+  capW?: Float32Array,
+  wallDist?: Float32Array,
+): { offset: Float32Array; dist: Float32Array } {
   const { width: W, height: H, inside } = s;
   const offset = new Float32Array(W * H * 2);
   const dist = new Float32Array(s.dist);
@@ -534,6 +899,20 @@ export function ringOffsets(s: Silhouette, signedDist: Float32Array): { offset: 
     }
   }
   for (let p = 0; p < W * H; p++) if (ring[p] === 0) dist[p] = 0.02;
+  // Near a cap what matters is the distance to the walls, which sliding along
+  // the cap's normal does not change but sliding towards a wall does.
+  if (capW && wallDist) {
+    const wd = (i: number, j: number) => wallDist[clamp(j, 0, H - 1) * W + clamp(i, 0, W - 1)];
+    for (let p = 0; p < W * H; p++) {
+      if (ring[p] < 0 || !capW[p]) continue;
+      const i = p % W;
+      const j = (p - i) / W;
+      const gi = (wd(i + 1, j) - wd(i - 1, j)) / 2;
+      const gj = (wd(i, j + 1) - wd(i, j - 1)) / 2;
+      const d = Math.max(0.05, s.dist[p] + gi * offset[p * 2] + gj * offset[p * 2 + 1]);
+      dist[p] += (d - dist[p]) * capW[p];
+    }
+  }
   return { offset, dist };
 }
 
