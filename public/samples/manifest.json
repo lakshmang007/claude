@@ -1,0 +1,118 @@
+{
+  "samples": [
+    {
+      "id": "hot-sauce",
+      "title": "Hot sauce bottle",
+      "query": "ember co smoked habanero hot sauce bottle",
+      "photo": "samples/hot-sauce/front.jpg",
+      "references": [
+        {
+          "id": "hot-sauce-front-crop",
+          "title": "Ember & Co. Smoked Habanero Hot Sauce 150 ml",
+          "file": "samples/hot-sauce/front-crop.jpg",
+          "hint": "any",
+          "source": "Sample render"
+        },
+        {
+          "id": "hot-sauce-three-quarter",
+          "title": "Smoked Habanero hot sauce by Ember & Co.",
+          "file": "samples/hot-sauce/three-quarter.jpg",
+          "hint": "any",
+          "source": "Sample render"
+        },
+        {
+          "id": "hot-sauce-back",
+          "title": "Ember & Co. hot sauce, back label",
+          "file": "samples/hot-sauce/back.jpg",
+          "hint": "back",
+          "source": "Sample render"
+        },
+        {
+          "id": "hot-sauce-distractor",
+          "title": "Aqua Pure hydrating shampoo 300 ml",
+          "file": "samples/hot-sauce/distractor.jpg",
+          "hint": "any",
+          "source": "Sample render"
+        },
+        {
+          "id": "hot-sauce-right",
+          "title": "Ember & Co. Smoked Habanero, side view",
+          "file": "samples/hot-sauce/right.jpg",
+          "hint": "side",
+          "source": "Sample render"
+        },
+        {
+          "id": "hot-sauce-left",
+          "title": "Hot sauce bottle side view (Ember & Co.)",
+          "file": "samples/hot-sauce/left.jpg",
+          "hint": "side",
+          "source": "Sample render"
+        },
+        {
+          "id": "hot-sauce-top",
+          "title": "Ember & Co. hot sauce, top view",
+          "file": "samples/hot-sauce/top.jpg",
+          "hint": "top",
+          "source": "Sample render"
+        }
+      ]
+    },
+    {
+      "id": "rubber-duck",
+      "title": "Rubber duck",
+      "query": "yellow rubber duck bath toy blue star",
+      "photo": "samples/rubber-duck/front.jpg",
+      "references": [
+        {
+          "id": "rubber-duck-three-quarter",
+          "title": "Classic yellow rubber duck with blue star",
+          "file": "samples/rubber-duck/three-quarter.jpg",
+          "hint": "any",
+          "source": "Sample render"
+        },
+        {
+          "id": "rubber-duck-distractor",
+          "title": "Green ceramic coffee mug",
+          "file": "samples/rubber-duck/distractor.jpg",
+          "hint": "any",
+          "source": "Sample render"
+        },
+        {
+          "id": "rubber-duck-back",
+          "title": "Rubber duck, other side (red heart)",
+          "file": "samples/rubber-duck/back.jpg",
+          "hint": "back",
+          "source": "Sample render"
+        },
+        {
+          "id": "rubber-duck-front-crop",
+          "title": "Yellow rubber duck bath toy",
+          "file": "samples/rubber-duck/front-crop.jpg",
+          "hint": "any",
+          "source": "Sample render"
+        },
+        {
+          "id": "rubber-duck-left",
+          "title": "Rubber duck, head-on view",
+          "file": "samples/rubber-duck/left.jpg",
+          "hint": "side",
+          "source": "Sample render"
+        },
+        {
+          "id": "rubber-duck-right",
+          "title": "Rubber duck seen from behind",
+          "file": "samples/rubber-duck/right.jpg",
+          "hint": "side",
+          "source": "Sample render"
+        },
+        {
+          "id": "rubber-duck-top",
+          "title": "Rubber duck, top view",
+          "file": "samples/rubber-duck/top.jpg",
+          "hint": "top",
+          "source": "Sample render"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,173 @@
+{
+  "description": "Ground-truth turntable renders of the demo samples (scripts/render-samples.mjs). Each object is the true 3D object the sample photos were rendered from.",
+  "coordinateSystem": {
+    "x": "right in the main photo (public/samples/<id>/front.jpg)",
+    "y": "up",
+    "z": "towards the main photo's camera (the photo shows the object's +z side)",
+    "handedness": "right-handed (three.js)",
+    "normalisation": "object scaled to height 1.0, base on y = 0, bounding box centred on x = z = 0"
+  },
+  "camera": {
+    "type": "perspective",
+    "fovYDeg": 30,
+    "aspect": 1,
+    "near": 0.05,
+    "far": 100,
+    "target": [
+      0,
+      0.5,
+      0
+    ],
+    "distance": 3,
+    "elevationDeg": 12,
+    "up": [
+      0,
+      1,
+      0
+    ],
+    "azimuthsDeg": [
+      0,
+      45,
+      90,
+      135,
+      180
+    ],
+    "azimuth": "0 = the main photo's viewpoint (camera on +z). Positive azimuth moves the camera towards +x (the photo's right-hand side), i.e. counter-clockwise seen from above; 90 looks at the object's +x side, 180 at its back.",
+    "position": "target + distance * [cos(el) * sin(az), sin(el), cos(el) * cos(az)]"
+  },
+  "image": {
+    "width": 640,
+    "height": 640,
+    "format": "png",
+    "background": "#2a2f38",
+    "file": "<id>-az<deg>.png"
+  },
+  "rendering": {
+    "engine": "three.js WebGLRenderer (headless Chromium, SwiftShader), 2x supersampled",
+    "lighting": "RoomEnvironment through PMREMGenerator.fromScene(env, 0.04) as scene.environment only; no direct lights, no shadows",
+    "toneMapping": "none",
+    "outputColorSpace": "srgb"
+  },
+  "objects": {
+    "hot-sauce": {
+      "photo": "public/samples/hot-sauce/front.jpg",
+      "files": [
+        "hot-sauce-az0.png",
+        "hot-sauce-az45.png",
+        "hot-sauce-az90.png",
+        "hot-sauce-az135.png",
+        "hot-sauce-az180.png"
+      ],
+      "boundingBox": {
+        "min": [
+          -0.1624,
+          0,
+          -0.1632
+        ],
+        "max": [
+          0.1624,
+          1,
+          0.1632
+        ]
+      },
+      "photoCamera": {
+        "fovYDeg": 17,
+        "elevationDeg": 4,
+        "azimuthDeg": 0,
+        "distance": 4.5146,
+        "target": [
+          0,
+          0.4925,
+          0.0005
+        ]
+      },
+      "cameraPositions": {
+        "0": [
+          0,
+          1.123735,
+          2.934443
+        ],
+        "45": [
+          2.074964,
+          1.123735,
+          2.074964
+        ],
+        "90": [
+          2.934443,
+          1.123735,
+          0
+        ],
+        "135": [
+          2.074964,
+          1.123735,
+          -2.074964
+        ],
+        "180": [
+          0,
+          1.123735,
+          -2.934443
+        ]
+      }
+    },
+    "rubber-duck": {
+      "photo": "public/samples/rubber-duck/front.jpg",
+      "files": [
+        "rubber-duck-az0.png",
+        "rubber-duck-az45.png",
+        "rubber-duck-az90.png",
+        "rubber-duck-az135.png",
+        "rubber-duck-az180.png"
+      ],
+      "boundingBox": {
+        "min": [
+          -0.6477,
+          0,
+          -0.4842
+        ],
+        "max": [
+          0.6477,
+          1,
+          0.4842
+        ]
+      },
+      "photoCamera": {
+        "fovYDeg": 17,
+        "elevationDeg": 4,
+        "azimuthDeg": 0,
+        "distance": 5.7132,
+        "target": [
+          -0.0008,
+          0.4977,
+          0.0002
+        ]
+      },
+      "cameraPositions": {
+        "0": [
+          0,
+          1.123735,
+          2.934443
+        ],
+        "45": [
+          2.074964,
+          1.123735,
+          2.074964
+        ],
+        "90": [
+          2.934443,
+          1.123735,
+          0
+        ],
+        "135": [
+          2.074964,
+          1.123735,
+          -2.074964
+        ],
+        "180": [
+          0,
+          1.123735,
+          -2.934443
+        ]
+      }
+    }
+  }
+}
