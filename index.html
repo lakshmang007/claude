@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TrueForm 3D</title>
+    <meta name="description" content="Turn one photo into a textured 3D model that matches the picture, using reference views of the same object found on the web." />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <img src="/favicon.svg" alt="" width="26" height="26" />
+        <span>TrueForm 3D</span>
+      </div>
+      <p class="tagline">Photo → 3D that keeps your picture exact, with the unseen sides taken from real reference photos on the web</p>
+      <div class="badges">
+        <span id="ai-badge" class="badge" title="In-browser AI models">AI: off</span>
+        <span id="search-badge" class="badge" title="Web image search providers">Web search: …</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="panel" id="panel">
+        <section class="card" id="photo-card">
+          <h2><span class="step">1</span>Photo</h2>
+          <label class="dropzone" id="dropzone" tabindex="0">
+            <input type="file" id="file-input" accept="image/*" hidden />
+            <div class="dz-empty" id="dz-empty">
+              <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true"><path fill="currentColor" d="M19 7v2.99s-1.99.01-2 0V7h-3s.01-1.99 0-2h3V2h2v3h3v2h-3zm-3 4V8h-3V5H5c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2v-8h-3zM5 19l3-4 2 3 3-4 4 5H5z"/></svg>
+              <strong>Drop a photo of an object</strong>
+              <span>or click to browse · paste with Ctrl+V · drag from another tab</span>
+            </div>
+            <canvas id="photo-preview" hidden></canvas>
+          </label>
+          <div class="row wrap" id="photo-tools" hidden>
+            <label class="field">Cut-out
+              <select id="cutout-mode">
+                <option value="auto">Auto</option>
+                <option value="ai">AI matting</option>
+                <option value="color">Colour key (plain backdrop)</option>
+                <option value="alpha">Image transparency</option>
+                <option value="none">Whole image</option>
+              </select>
+            </label>
+            <label class="field" id="tolerance-field">Backdrop tolerance
+              <input type="range" id="tolerance" min="4" max="40" step="1" value="16" />
+            </label>
+            <label class="toggle"><input type="checkbox" id="show-mask" checked /> Preview cut-out</label>
+          </div>
+          <p class="hint" id="photo-info"></p>
+        </section>
+
+        <section class="card" id="refs-card">
+          <h2><span class="step">2</span>Reference views from the web</h2>
+          <p class="hint">Photos of the same object from other angles. The back and sides of your model are copied from these real photos rather than invented.</p>
+          <div class="search-row">
+            <input id="query" type="search" placeholder="What is it? e.g. Nike Air Max 90" autocomplete="off" />
+            <button id="identify-btn" class="ghost" title="Guess the object with in-browser AI">Identify</button>
+            <button id="search-btn">Search web</button>
+          </div>
+          <div id="suggestions" class="chips"></div>
+          <div id="search-status" class="hint"></div>
+          <div id="results" class="results"></div>
+          <div class="row wrap">
+            <button id="autopick-btn" class="ghost" disabled>Auto-pick best views</button>
+            <label class="toggle"><input type="checkbox" id="auto-refs" checked /> Search automatically when generating</label>
+          </div>
+          <details class="browser-search">
+            <summary>Search in your own browser instead</summary>
+            <p class="hint">Opens a new tab. Drag any image from that tab onto a slot below, or copy its address and use a slot's “URL” button.</p>
+            <div id="browser-links" class="links"></div>
+          </details>
+          <div class="slots" id="slots"></div>
+        </section>
+
+        <section class="card">
+          <details id="settings">
+            <summary><h2><span class="step">3</span>Shape &amp; texture</h2></summary>
+            <div id="settings-body" class="settings"></div>
+          </details>
+        </section>
+
+        <div class="generate-bar">
+          <button id="generate-btn" class="primary" disabled>Generate 3D model</button>
+        </div>
+      </aside>
+
+      <section class="stage" id="stage">
+        <div class="viewer" id="viewer"></div>
+        <div class="empty" id="empty-state">
+          <div class="empty-inner">
+            <h1>One photo in. A model that looks exactly like it out.</h1>
+            <ol>
+              <li><b>Exact front.</b> Your photo is projected onto the model pixel for pixel, so text, logos and colours survive.</li>
+              <li><b>Real back and sides.</b> Instead of guessing, TrueForm finds photos of the same object on the web and uses them for the hidden sides and the true depth.</li>
+              <li><b>Checkable.</b> “Compare with photo” lines the model up with your picture and wipes between them.</li>
+            </ol>
+          </div>
+        </div>
+
+        <div class="toolbar" id="toolbar" hidden>
+          <div class="segmented" role="group" aria-label="Shading">
+            <button data-shading="lit" class="active">Lit</button>
+            <button data-shading="unlit">Photo</button>
+            <button data-shading="clay">Clay</button>
+          </div>
+          <button id="wire-btn" class="tool" aria-pressed="false">Wireframe</button>
+          <button id="rotate-btn" class="tool" aria-pressed="false">Turntable</button>
+          <button id="compare-btn" class="tool" aria-pressed="false">Compare with photo</button>
+          <button id="reset-btn" class="tool">Reset view</button>
+        </div>
+
+        <div class="compare-bar" id="compare-bar" hidden>
+          <span>3D render</span>
+          <input type="range" id="split" min="0" max="1" step="0.001" value="0.5" aria-label="Wipe between render and photo" />
+          <span>Original photo</span>
+        </div>
+
+        <div class="stats" id="stats" hidden></div>
+
+        <div class="exports" id="exports" hidden>
+          <label class="field inline">Real height
+            <input type="number" id="real-height" value="20" min="0.1" step="0.1" /> cm
+          </label>
+          <button data-export="glb" class="primary small" title="glTF binary with texture — Blender, Unity, Unreal, web">GLB</button>
+          <button data-export="obj" class="small" title="OBJ + MTL + texture (zip)">OBJ</button>
+          <button data-export="stl" class="small" title="Watertight STL in millimetres for 3D printing">STL</button>
+          <button data-export="usdz" class="small" title="USDZ for iPhone / iPad AR Quick Look">USDZ</button>
+        </div>
+
+        <div class="progress" id="progress" hidden>
+          <div class="progress-title" id="progress-title">Working…</div>
+          <div class="bar"><div id="progress-fill"></div></div>
+          <ol id="progress-log"></ol>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

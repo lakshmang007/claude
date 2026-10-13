@@ -1,0 +1,30 @@
+{
+  "name": "true-form-3d",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@types/node": "^26.6.5",
+    "@types/three": "^0.186.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.4"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.3.1",
+    "three": "^0.186.1"
+  },
+  "description": "Photo to 3D model that keeps the picture exact, with hidden sides taken from reference photos of the same object found on the web.",
+  "engines": {
+    "node": ">=20"
+  }
+}
