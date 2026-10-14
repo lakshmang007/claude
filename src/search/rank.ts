@@ -200,6 +200,11 @@ function hellinger(a: Float32Array, b: Float32Array): number {
   return Math.sqrt(Math.max(0, 1 - histogramSimilarity(a, b)));
 }
 
+/** How different the colours at the two ends of the main photo are (Hellinger distance). */
+export function endContrast(ends: EndColors): number {
+  return hellinger(ends.left, ends.right);
+}
+
 export interface SideCall {
   end: SideEnd | null;
   /** How much closer the view's colours are to the left end than to the right end (Hellinger distance). */
@@ -220,11 +225,167 @@ export const MIN_SIDE_MARGIN = 0.06;
  * end (a beak on a duck's tail) is worse than painting none.
  */
 export function whichEnd(side: Float32Array, ends: EndColors): SideCall {
-  const contrast = hellinger(ends.left, ends.right);
+  const contrast = endContrast(ends);
   // By the triangle inequality |margin| <= contrast.
   const margin = hellinger(side, ends.right) - hellinger(side, ends.left);
   const end = contrast >= MIN_END_CONTRAST && Math.abs(margin) >= MIN_SIDE_MARGIN ? (margin > 0 ? 'left' : 'right') : null;
   return { end, margin, contrast };
+}
+
+// ---------------------------------------------------------------------------
+// Mirror-symmetric objects: a side view shows either end, only its orientation matters
+
+/** How much a cut-out must overlap its own mirror image to count as mirror-symmetric. */
+export const MIN_MIRROR_IOU = 0.97;
+
+/** IoU of a cut-out with its mirror image about the middle of its bounding box (1 = a mirror-symmetric outline). */
+export function mirrorSymmetry(mask: ByteField): number {
+  const { width: W, height: H, data } = mask;
+  let x0 = W;
+  let x1 = -1;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (data[y * W + x] < 128) continue;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+    }
+  }
+  if (x1 < x0) return 0;
+  let inter = 0;
+  let union = 0;
+  for (let y = 0; y < H; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const a = data[y * W + x] >= 128;
+      const b = data[y * W + x0 + x1 - x] >= 128;
+      if (a && b) inter++;
+      if (a || b) union++;
+    }
+  }
+  return union ? inter / union : 0;
+}
+
+/**
+ * The photo's outline is mirror-symmetric and its two ends look alike (a bottle,
+ * a vase): the object looks the same from either side, so any side view is valid
+ * texture for both sides once it is turned the right way round. A mug's handle or
+ * a duck's beak makes an object asymmetric.
+ */
+export function isMirrorSymmetric(mask: ByteField, ends: EndColors): boolean {
+  return endContrast(ends) < MIN_END_CONTRAST && mirrorSymmetry(mask) >= MIN_MIRROR_IOU;
+}
+
+/** Rows of a cut-out are compared in this many bands, from its top to its bottom. */
+const PROFILE_BANDS = 24;
+/** The outermost part of each row that counts as its left or right edge strip. */
+const EDGE_FRACTION = 0.3;
+
+/** Mean colour (0..1 RGB, 3 values per row band) of a cut-out's left and right edge strips and of its whole rows; NaN where a band is empty. */
+export interface EdgeProfiles {
+  left: Float32Array;
+  right: Float32Array;
+  all: Float32Array;
+}
+
+/**
+ * Colour profiles of a cut-out from top to bottom: per row band, the mean colour
+ * of the outermost `frac` of each row's object pixels at its left and its right,
+ * and of the whole row. Rows are measured from the cut-out's own top and bottom,
+ * so views of different sizes line up.
+ */
+export function edgeProfiles(img: RGBAImage, mask: ByteField, bands = PROFILE_BANDS, frac = EDGE_FRACTION): EdgeProfiles | null {
+  const { width: W, height: H } = mask;
+  let y0 = H;
+  let y1 = -1;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (mask.data[y * W + x] < 200) continue;
+      if (y < y0) y0 = y;
+      y1 = y;
+      break;
+    }
+  }
+  if (y1 - y0 < bands) return null;
+  const sums = [new Float64Array(bands * 3), new Float64Array(bands * 3), new Float64Array(bands * 3)];
+  const counts = [new Float64Array(bands), new Float64Array(bands), new Float64Array(bands)];
+  for (let y = y0; y <= y1; y++) {
+    let l = -1;
+    let r = -1;
+    for (let x = 0; x < W; x++) {
+      if (mask.data[y * W + x] < 200) continue;
+      if (l < 0) l = x;
+      r = x;
+    }
+    if (l < 0) continue;
+    const band = Math.min(bands - 1, Math.floor(((y - y0 + 0.5) / (y1 - y0 + 1)) * bands));
+    const strip = (r - l + 1) * frac;
+    for (let x = l; x <= r; x++) {
+      const p = y * W + x;
+      // Soft edges mix in the backdrop.
+      if (mask.data[p] < 200) continue;
+      const o = p * 4;
+      const parts = [x - l < strip ? 0 : -1, r - x < strip ? 1 : -1, 2];
+      for (const k of parts) {
+        if (k < 0) continue;
+        for (let c = 0; c < 3; c++) sums[k][band * 3 + c] += img.data[o + c] / 255;
+        counts[k][band]++;
+      }
+    }
+  }
+  const [left, right, all] = sums.map((s, k) => {
+    const out = new Float32Array(bands * 3);
+    for (let i = 0; i < out.length; i++) out[i] = counts[k][Math.floor(i / 3)] ? s[i] / counts[k][Math.floor(i / 3)] : NaN;
+    return out;
+  });
+  return { left, right, all };
+}
+
+export interface FacingCall {
+  /** The side of the image the object's front is on. */
+  front: SideEnd;
+  /** Correlation (-1..1) behind the call: > 0 front on the left, < 0 on the right; near 0 it is a guess. */
+  score: number;
+}
+
+/**
+ * Which side of a side view shows the object's front: compares, band by band
+ * down the object, how the view's left edge strip differs from its right one
+ * with how the main photo differs from the back view.
+ *
+ * Seen from a side, an edge of the view is the middle of the front or of the
+ * back, which the main photo and the back view show face-on: the front label's
+ * dark band at a given height shows up on that edge of the side view, the back
+ * label's barcode on the other. Without a back view the front is compared with
+ * the side view's own average colours instead. Profiles are centred per colour
+ * channel, so a side lit more strongly from one side does not decide it.
+ */
+export function sideFacing(side: EdgeProfiles, front: EdgeProfiles, back: EdgeProfiles | null): FacingCall {
+  const a: number[][] = [[], [], []];
+  const b: number[][] = [[], [], []];
+  for (let i = 0; i < side.left.length; i++) {
+    const f = (front.left[i] + front.right[i]) / 2;
+    const other = back ? (back.left[i] + back.right[i]) / 2 : side.all[i];
+    const d = side.left[i] - side.right[i];
+    const e = f - other;
+    if (Number.isNaN(d) || Number.isNaN(e)) continue;
+    a[i % 3].push(d);
+    b[i % 3].push(e);
+  }
+  let ab = 0;
+  let aa = 0;
+  let bb = 0;
+  for (let c = 0; c < 3; c++) {
+    const n = a[c].length;
+    if (!n) continue;
+    const ma = a[c].reduce((s, v) => s + v, 0) / n;
+    const mb = b[c].reduce((s, v) => s + v, 0) / n;
+    for (let i = 0; i < n; i++) {
+      ab += (a[c][i] - ma) * (b[c][i] - mb);
+      aa += (a[c][i] - ma) ** 2;
+      bb += (b[c][i] - mb) ** 2;
+    }
+  }
+  const score = aa > 0 && bb > 0 ? ab / Math.sqrt(aa * bb) : 0;
+  return { front: score >= 0 ? 'left' : 'right', score };
 }
 
 // ---------------------------------------------------------------------------
@@ -233,11 +394,23 @@ export function whichEnd(side: Float32Array, ends: EndColors): SideCall {
 export type Slot = ViewName;
 
 export interface AutoPicks {
-  /** Candidate index per reference slot. */
+  /** Candidate index per reference slot (the same one in both side slots when a symmetric object's only side view serves both). */
   slots: Partial<Record<Slot, number>>;
   /** Slots whose photo only sets the shape: a side view of which it is unknown which end it shows. */
   shapeOnly: Slot[];
+  /** Side slots whose photo is to be mirrored: a symmetric object's side view facing the other way. */
+  flip: Slot[];
 }
+
+export interface SymmetricSides {
+  /** The object's outline is mirror-symmetric and its ends look alike (see isMirrorSymmetric). */
+  symmetric: boolean;
+  /** The side of a side view's image the object's front is on; `back` is the candidate picked for the back slot. Null if unknown. */
+  frontOn?: (index: number, back: number | undefined) => SideEnd | null;
+}
+
+/** The slot a side view fits unmirrored: seen from the right (+x) the object's front is on the image's left, seen from the left on its right. */
+const slotFacing = (front: SideEnd | null): 'left' | 'right' => (front === 'right' ? 'left' : 'right');
 
 /**
  * Pick the best candidate for each reference slot: similar to the user's
@@ -245,17 +418,21 @@ export interface AutoPicks {
  * input photo are skipped because they add no new information.
  *
  * Side views go to the left or right slot by `sideOf` (which end of the object
- * they show). When no side view can be placed, the best one still sets the
- * object's depth, as shape only.
+ * they show). When no side view can be placed:
+ * - a mirror-symmetric object (`sym`) looks the same from either side, so its
+ *   best side view textures the slot it faces and the next one (or the same one,
+ *   mirrored) the other slot, each turned so the object's front is where that
+ *   side's camera sees it;
+ * - otherwise the best one still sets the object's depth, as shape only.
  */
-export function autoAssign(scored: Scored[], mode: 'clip' | 'color', sideOf?: (index: number) => SideEnd | null): AutoPicks {
+export function autoAssign(scored: Scored[], mode: 'clip' | 'color', sideOf?: (index: number) => SideEnd | null, sym?: SymmetricSides): AutoPicks {
   const minSim = mode === 'clip' ? 0.6 : 0.45;
   const maxSim = mode === 'clip' ? 0.97 : 0.995;
   const minP = mode === 'clip' ? 0.3 : 0.5;
   const best = Math.max(0, ...scored.map((s) => s.similarity));
   const relFloor = best * (mode === 'clip' ? 0.85 : 0.75);
   const used = new Set<number>();
-  const out: AutoPicks = { slots: {}, shapeOnly: [] };
+  const out: AutoPicks = { slots: {}, shapeOnly: [], flip: [] };
   const eligible = (view: CandidateView) =>
     scored
       .filter((s) => !used.has(s.index) && s.similarity >= minSim && s.similarity >= relFloor && s.similarity <= maxSim && s.probs[view] >= minP)
@@ -272,8 +449,23 @@ export function autoAssign(scored: Scored[], mode: 'clip' | 'color', sideOf?: (i
     if (end && out.slots[end] === undefined) take(end, s.index);
   }
   if (sides.length && out.slots.left === undefined && out.slots.right === undefined) {
-    take('right', sides[0].index);
-    out.shapeOnly.push('right');
+    if (sym?.symmetric) {
+      const facing = (index: number) => sym.frontOn?.(index, out.slots.back) ?? null;
+      const [first, second] = sides;
+      const slot = slotFacing(facing(first.index));
+      const other = slot === 'right' ? 'left' : 'right';
+      take(slot, first.index);
+      if (second) {
+        take(other, second.index);
+        if (slotFacing(facing(second.index)) !== other) out.flip.push(other);
+      } else {
+        out.slots[other] = first.index;
+        out.flip.push(other);
+      }
+    } else {
+      take('right', sides[0].index);
+      out.shapeOnly.push('right');
+    }
   }
   const top = eligible('top')[0];
   if (top) take('top', top.index);

@@ -56,6 +56,8 @@ describe('sample manifest', () => {
     // Page-relative too, so a build under a sub-path never calls the host's own /api.
     expect(proxied('https://example.com/a.jpg')).toBe('api/image?url=https%3A%2F%2Fexample.com%2Fa.jpg');
     expect(proxied('//example.com/a.jpg')).toMatch(/^api\/image\?url=/);
+    // Thumbnails are shown from the copy ranking downloaded, not downloaded again.
+    expect(proxied('blob:http://127.0.0.1:5180/0b6c')).toBe('blob:http://127.0.0.1:5180/0b6c');
   });
 });
 

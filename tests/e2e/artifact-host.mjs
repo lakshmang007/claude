@@ -2,6 +2,8 @@
 // Serves artifact/ the way a locked-down artifact host does: the page fragment wrapped in the
 // host's own <!doctype html><head><body> skeleton, under a sub-path, with a policy that allows
 // no external stylesheets and no requests to other origins, and no /api behind it.
+// Like many such hosts it sends no caching headers at all (no Cache-Control, ETag or Last-Modified), so the
+// browser downloads a file again whenever the page asks for it again; tests count those downloads.
 //
 //   node tests/e2e/artifact-host.mjs [port]
 import fs from 'node:fs';

@@ -23,14 +23,19 @@ export async function blobToRGBA(blob: Blob, maxSize: number): Promise<RGBAImage
   return { width: w, height: h, data: data.data };
 }
 
-/** Fetch an image from the web through the same-origin proxy and decode it. */
-export async function urlToRGBA(url: string, maxSize: number): Promise<RGBAImage> {
+/** Fetch an image file from the web through the same-origin proxy (same-origin and data: URLs directly). */
+export async function fetchImage(url: string): Promise<Blob> {
   const res = await fetch(proxied(url));
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     throw new Error(body?.error ? `Could not load image: ${body.error}` : `Could not load image (${res.status})`);
   }
-  return blobToRGBA(await res.blob(), maxSize);
+  return res.blob();
+}
+
+/** Fetch an image from the web through the same-origin proxy and decode it. */
+export async function urlToRGBA(url: string, maxSize: number): Promise<RGBAImage> {
+  return blobToRGBA(await fetchImage(url), maxSize);
 }
 
 export function rgbaToCanvas(img: RGBAImage, canvas = document.createElement('canvas')): HTMLCanvasElement {

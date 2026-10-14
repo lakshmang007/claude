@@ -17,23 +17,27 @@ import {
 import { download, exportGLB, exportOBJZip, exportSTL, exportUSDZ } from './export/exporters';
 import { MLClient } from './ml/client';
 import { DEFAULT_MODELS, type MLProgress } from './ml/protocol';
-import { apiHealth, browserSearchLinks, proxied, searchReferences, type SearchResult } from './search/client';
+import { apiHealth, browserSearchLinks, searchReferences, type SearchResult } from './search/client';
 import { LABELS, PROMPT, queryFromFilename, topLabels } from './search/identify';
 import {
   autoAssign,
   CANDIDATE_VIEWS,
+  edgeProfiles,
   frontEndColors,
+  isMirrorSymmetric,
   objectColors,
   scoreWithClip,
   scoreWithColor,
+  sideFacing,
   viewPrompts,
   whichEnd,
   type CandidateView,
+  type EdgeProfiles,
   type Scored,
   type SideEnd,
 } from './search/rank';
 import { loadSamples, sampleResults, type Sample } from './search/samples';
-import { blobToRGBA, drawPreview, nameFromUrl, readDataTransfer, rgbaToCanvas, urlToRGBA, type DroppedImage } from './ui/imageio';
+import { blobToRGBA, drawPreview, fetchImage, nameFromUrl, readDataTransfer, rgbaToCanvas, urlToRGBA, type DroppedImage } from './ui/imageio';
 import { Viewer, type Shading } from './viewer/viewer';
 
 // ---------------------------------------------------------------------------
@@ -60,13 +64,23 @@ interface RefSlot extends Photo {
   shapeOnly: boolean;
   /** One of a bundled sample's reference images. */
   sample: boolean;
+  /** Why auto-pick put it here, for the slot's tooltip. */
+  note?: string;
 }
 
 interface Candidate {
   result: SearchResult;
+  /** The thumbnail file, downloaded once: decoded for ranking and shown in its result tile. */
+  blob?: Blob;
+  /** Object URL of `blob` while the candidate is listed. */
+  blobUrl?: string;
+  /** The result tile's image, kept across re-renders so it is not requested again. */
+  img?: HTMLImageElement;
   thumb?: RGBAImage;
   score?: Scored;
   failed?: boolean;
+  /** The object cut out of `thumb` where its backdrop is plain (null: it could not be). */
+  cut?: ByteField | null;
   /** Object colours, for telling which end of the object a side view shows. */
   colors?: Float32Array;
 }
@@ -80,6 +94,9 @@ const DEMO_SEARCH_NOTE = 'Live web search needs the TrueForm server (npm start).
 const DEMO_AI_NOTE = 'Not available in the hosted demo — run TrueForm locally';
 const SHAPE_ONLY_NOTE =
   'Shape only: it is not clear which end of the object this side view shows, so it sets the depth but paints no texture (a wrong guess would put, say, a beak on a tail). Click to use its texture as well.';
+const SYMMETRIC_NOTE =
+  'The object’s outline is mirror-symmetric and its two ends look alike, so a side view fits either side. It is turned so that its edge showing the front matches the photo.';
+const MIRRORED_COPY_NOTE = 'The object’s outline is mirror-symmetric and its two ends look alike, so the other side view, mirrored, serves this side too.';
 
 const state = {
   front: null as Photo | null,
@@ -317,10 +334,14 @@ async function loadDropped(d: DroppedImage, max: number): Promise<{ image: RGBAI
 
 async function loadCandidate(c: Candidate, max: number) {
   let image: RGBAImage;
-  try {
-    image = await urlToRGBA(c.result.url, max);
-  } catch {
-    image = await urlToRGBA(c.result.thumbnail, max);
+  // Bundled samples have no separate thumbnail: the file ranking downloaded is the full image.
+  if (c.blob && c.result.url === c.result.thumbnail) image = await blobToRGBA(c.blob, max);
+  else {
+    try {
+      image = await urlToRGBA(c.result.url, max);
+    } catch {
+      image = c.blob ? await blobToRGBA(c.blob, max) : await urlToRGBA(c.result.thumbnail, max);
+    }
   }
   return { image, name: c.result.title, source: c.result.pageUrl || c.result.url, resultId: c.result.id };
 }
@@ -329,6 +350,7 @@ async function setFront(image: RGBAImage, name: string, source: string) {
   state.front = { image, name, source };
   state.frontEmbedding = null;
   state.result = null;
+  updateModelState();
   $('dz-empty').hidden = true;
   $('photo-preview').hidden = false;
   $('photo-tools').hidden = false;
@@ -440,8 +462,7 @@ async function runSearch(): Promise<boolean> {
   ($('search-btn') as HTMLButtonElement).disabled = true;
   try {
     const res = await searchReferences(q, true);
-    state.candidates = res.results.slice(0, 60).map((result) => ({ result }));
-    state.rankMode = null;
+    setCandidates(res.results.slice(0, 60));
     if (state.sampleId) {
       // The candidates are web results now, not the sample's.
       state.sampleId = null;
@@ -474,13 +495,27 @@ async function mapLimit<T>(items: T[], limit: number, fn: (t: T, i: number) => P
   );
 }
 
+/** Replaces the candidates (search results or a sample's images), releasing the previous ones' thumbnails. */
+function setCandidates(results: SearchResult[]) {
+  for (const c of state.candidates) if (c.blobUrl) URL.revokeObjectURL(c.blobUrl);
+  state.candidates = results.map((result) => ({ result }));
+  state.rankMode = null;
+}
+
 /** Ranks the candidates against the photo; returns how many could be loaded and ranked. */
 async function rankCandidates(): Promise<number> {
   const p = state.front;
   if (!p) return 0;
-  await mapLimit(state.candidates, 6, async (c) => {
+  const list = state.candidates;
+  await mapLimit(list, 6, async (c) => {
     try {
-      c.thumb = await urlToRGBA(c.result.thumbnail, 256);
+      // One download per thumbnail: hosts without cache headers would otherwise serve it again for every re-rendered tile.
+      c.blob ??= await fetchImage(c.result.thumbnail);
+      c.thumb ??= await blobToRGBA(c.blob, 256);
+      if (!c.blobUrl && state.candidates === list) {
+        c.blobUrl = URL.createObjectURL(c.blob);
+        if (c.img) c.img.src = c.blobUrl;
+      }
     } catch {
       c.failed = true;
     }
@@ -532,8 +567,11 @@ function renderResults() {
     if (c.failed) return;
     const assigned = VIEW_NAMES.find((v) => state.refs[v]?.resultId === c.result.id);
     const tile = el('div', { class: `result${assigned ? ' assigned' : ''}`, draggable: 'true', title: `${c.result.title}\n${c.result.source}${c.result.license ? ` · ${c.result.license}` : ''}` });
-    const img = el('img', { src: proxied(c.result.thumbnail), alt: c.result.title, loading: 'lazy', referrerpolicy: 'no-referrer' });
+    // The same element every time, showing the thumbnail ranking downloaded (until then, an empty tile).
+    c.img ??= el('img', { alt: '', referrerpolicy: 'no-referrer', ...(c.blobUrl ? { src: c.blobUrl } : {}) });
+    const img = c.img;
     img.onerror = () => tile.classList.add('broken');
+    img.onload = () => (img.alt = c.result.title);
     tile.append(img);
     if (c.score) {
       tile.append(el('span', { class: 'tag', text: assigned ? `→ ${assigned}` : VIEW_LABEL[c.score.view] }));
@@ -567,14 +605,28 @@ async function assignCandidate(view: ViewName, c: Candidate) {
   }
 }
 
+/** The object in a reference image, where its backdrop is plain enough for the colour key; else null. */
+function cutOut(image: RGBAImage): ByteField | null {
+  const seg = segmentByColor(image, { tolerance: tolerance(), enclosedHoles: true, workSize: 256 });
+  return seg.method === 'color-key' && seg.confidence >= 0.5 ? seg.mask : null;
+}
+
+function candidateCut(c: Candidate): ByteField | null {
+  if (!c.thumb) return null;
+  if (c.cut === undefined) c.cut = cutOut(c.thumb);
+  return c.cut;
+}
+
 /** Colours of a candidate's object, cut out of its thumbnail where the backdrop is plain (else its central region). */
 function candidateColors(c: Candidate): Float32Array | null {
   if (!c.thumb) return null;
-  if (!c.colors) {
-    const seg = segmentByColor(c.thumb, { tolerance: tolerance(), enclosedHoles: true, workSize: 256 });
-    c.colors = objectColors(c.thumb, seg.method === 'color-key' && seg.confidence >= 0.5 ? seg.mask : null);
-  }
+  c.colors ??= objectColors(c.thumb, candidateCut(c));
   return c.colors;
+}
+
+function candidateEdges(c: Candidate | undefined): EdgeProfiles | null {
+  const cut = c && candidateCut(c);
+  return c?.thumb && cut ? edgeProfiles(c.thumb, cut) : null;
 }
 
 async function autoPick(): Promise<ViewName[]> {
@@ -588,18 +640,37 @@ async function autoPick(): Promise<ViewName[]> {
     const colors = ends && candidateColors(ranked[i]);
     return ends && colors ? whichEnd(colors, ends).end : null;
   };
+  // An object that looks the same from either side takes any side view, turned to match the photo and the back view.
+  const symmetric = !!(front?.mask && ends && isMirrorSymmetric(front.mask, ends));
+  const frontEdges = symmetric && front?.mask ? edgeProfiles(front.image, front.mask) : null;
+  const backRef = state.refs.back;
+  const frontOn = (i: number, back: number | undefined): SideEnd | null => {
+    const side = candidateEdges(ranked[i]);
+    if (!frontEdges || !side) return null;
+    const backCut = backRef ? (backRef.mask ?? cutOut(backRef.image)) : null;
+    const backEdges = backRef ? (backCut ? edgeProfiles(backRef.image, backCut) : null) : candidateEdges(back === undefined ? undefined : ranked[back]);
+    return sideFacing(side, frontEdges, backEdges).front;
+  };
   const picks = autoAssign(
     ranked.map((c, i) => ({ ...c.score!, index: i })),
     state.rankMode,
     sideOf,
+    { symmetric, frontOn },
   );
   const done: ViewName[] = [];
+  const loads = new Map<number, ReturnType<typeof loadCandidate>>();
   for (const slot of VIEW_NAMES) {
     const idx = picks.slots[slot];
     if (idx === undefined || state.refs[slot]) continue;
     try {
-      const loaded = await loadCandidate(ranked[idx], REF_MAX);
-      setRef(slot, { ...loaded, flip: false, shapeOnly: picks.shapeOnly.includes(slot) });
+      // A symmetric object's only side view serves both sides: load it once.
+      if (!loads.has(idx)) loads.set(idx, loadCandidate(ranked[idx], REF_MAX));
+      const loaded = await loads.get(idx)!;
+      const flip = picks.flip.includes(slot);
+      const side = slot === 'left' || slot === 'right';
+      const copy = side && picks.slots[slot === 'left' ? 'right' : 'left'] === idx && flip;
+      const note = symmetric && side && !picks.shapeOnly.includes(slot) ? (copy ? MIRRORED_COPY_NOTE : SYMMETRIC_NOTE) : undefined;
+      setRef(slot, { ...loaded, flip, shapeOnly: picks.shapeOnly.includes(slot), note });
       done.push(slot);
     } catch {
       // skip images that cannot be fetched
@@ -608,8 +679,9 @@ async function autoPick(): Promise<ViewName[]> {
   return done;
 }
 
-/** "back, left, right (shape only)" */
-const describeViews = (views: ViewName[]) => views.map((v) => (state.refs[v]?.shapeOnly ? `${v} (shape only)` : v)).join(', ');
+/** "back, left (mirrored), right (shape only)" */
+const describeViews = (views: ViewName[]) =>
+  views.map((v) => (state.refs[v]?.shapeOnly ? `${v} (shape only)` : state.refs[v]?.flip ? `${v} (mirrored)` : v)).join(', ');
 
 // ---------------------------------------------------------------------------
 // Bundled samples
@@ -623,16 +695,17 @@ function renderSamples() {
   box.innerHTML = '';
   for (const sample of state.samples) {
     const b = el('button', { class: `chip${state.sampleId === sample.id ? ' active' : ''}`, text: sample.title, 'data-sample': sample.id, title: `Load the sample photo and its reference views: ${sample.query}` });
-    b.onclick = () => void loadSample(sample);
+    b.onclick = () => void openSample(sample);
     box.append(b);
   }
   $('samples').hidden = state.samples.length === 0;
 }
 
-async function loadSample(sample: Sample) {
+/** Loads a sample's photo and ranks its reference images; false if it could not. */
+async function loadSample(sample: Sample): Promise<boolean> {
   if (state.busy) {
     toast('Wait for the current model to finish.');
-    return;
+    return false;
   }
   try {
     const res = await fetch(sample.photo);
@@ -646,8 +719,7 @@ async function loadSample(sample: Sample) {
     await setFront(image, `${sample.id}.jpg`, 'sample photo');
     ($('query') as HTMLInputElement).value = sample.query;
     updateBrowserLinks();
-    state.candidates = sampleResults(sample).map((result) => ({ result }));
-    state.rankMode = null;
+    setCandidates(sampleResults(sample));
     renderResults();
     const status = $('search-status');
     status.textContent = `${state.candidates.length} sample reference images (studio renders of a test object, bundled with the demo). Ranking by similarity…`;
@@ -661,8 +733,24 @@ async function loadSample(sample: Sample) {
       const next = live ? 'Hover a result to use it as a view, or search the web for more.' : DEMO ? 'Live web search needs the TrueForm server (npm start).' : 'Hover a result to use it as a view.';
       status.textContent = `${ranked} sample reference images (studio renders of a test object, bundled with the demo), ranked by ${rankedBy()}. ${next}`;
     }
+    return true;
   } catch (e) {
     toast(`Could not load the sample: ${(e as Error).message}`, 'error');
+    return false;
+  }
+}
+
+/** Set while a picked sample is loading in the hosted demo, which builds it next. */
+let buildQueued = false;
+
+/** A sample picked by the visitor; the hosted demo builds it straight away, as it does the first one. */
+async function openSample(sample: Sample) {
+  buildQueued = DEMO && !state.busy;
+  try {
+    if ((await loadSample(sample)) && DEMO && state.sampleId === sample.id) await generate();
+  } finally {
+    buildQueued = false;
+    updateModelState();
   }
 }
 
@@ -670,8 +758,7 @@ async function loadSample(sample: Sample) {
 function leaveSample() {
   if (!state.sampleId) return;
   state.sampleId = null;
-  state.candidates = [];
-  state.rankMode = null;
+  setCandidates([]);
   for (const v of VIEW_NAMES) state.refs[v] = null;
   ($('query') as HTMLInputElement).value = '';
   $('search-status').textContent = '';
@@ -691,7 +778,7 @@ const SLOT_INFO: Record<ViewName, string> = {
   top: 'Top',
 };
 
-function setRef(view: ViewName, data: { image: RGBAImage; name: string; source: string; flip: boolean; resultId?: string; shapeOnly?: boolean } | null) {
+function setRef(view: ViewName, data: { image: RGBAImage; name: string; source: string; flip: boolean; resultId?: string; shapeOnly?: boolean; note?: string } | null) {
   // While a sample is open the candidates are its bundled images.
   state.refs[view] = data ? { ...data, shapeOnly: !!data.shapeOnly, sample: !!state.sampleId && !!data.resultId } : null;
   if (urlSlot?.view === view) urlSlot = null;
@@ -709,7 +796,7 @@ function renderSlots() {
   let focus: HTMLInputElement | null = null;
   for (const v of VIEW_NAMES) {
     const ref = state.refs[v];
-    const slot = el('div', { class: `slot${ref ? ' filled' : ''}${ref?.shapeOnly ? ' shape-only' : ''}`, 'data-view': v });
+    const slot = el('div', { class: `slot${ref ? ' filled' : ''}${ref?.shapeOnly ? ' shape-only' : ''}${ref?.flip ? ' mirrored' : ''}`, 'data-view': v });
     const title = el('div', { class: 'slot-title' }, el('span', { text: SLOT_INFO[v] }));
     const body = el('div', { class: 'slot-body' });
     if (ref) {
@@ -717,7 +804,7 @@ function renderSlots() {
       const img = ref.flip ? flipped(ref.image) : ref.image;
       drawPreview(c, img, null, 160);
       body.append(c);
-      slot.title = `From: ${ref.source}`;
+      slot.title = `From: ${ref.source}${ref.note ? `\n${ref.note}` : ''}`;
       if (ref.shapeOnly) {
         const badge = el('button', { class: 'slot-badge', text: 'shape only', title: SHAPE_ONLY_NOTE });
         badge.onclick = () => {
@@ -738,6 +825,8 @@ function renderSlots() {
       const flip = el('button', { text: '⇋', title: 'Mirror (if the object faces the other way)' });
       flip.onclick = () => {
         ref.flip = !ref.flip;
+        // The orientation is the user's now, not auto-pick's.
+        ref.note = undefined;
         ref.mask = undefined;
         ref.depth = undefined;
         renderSlots();
@@ -1049,6 +1138,7 @@ async function generate(opts: { quick?: boolean } = {}) {
   if (!front || state.busy) return;
   state.busy = true;
   state.dirty = false;
+  updateModelState();
   const gen = ++state.generation;
   const btn = $('generate-btn') as HTMLButtonElement;
   btn.disabled = true;
@@ -1118,6 +1208,7 @@ async function generate(opts: { quick?: boolean } = {}) {
     state.busy = false;
     btn.disabled = false;
     btn.textContent = 'Generate 3D model';
+    updateModelState();
     if (state.dirty) scheduleRegenerate();
   }
 }
@@ -1135,6 +1226,7 @@ function showResult(result: MeshResult) {
   $('empty-state').hidden = true;
   $('toolbar').hidden = false;
   $('exports').hidden = false;
+  updateModelState();
   const s = result.stats;
   const shapeOnly = s.shapeOnlyRefs ?? [];
   const all = [...s.usedRefs, ...shapeOnly];
@@ -1151,6 +1243,29 @@ function showResult(result: MeshResult) {
 // Viewer toolbar + export
 
 let currentShading: Shading = 'lit';
+
+/**
+ * After a new photo is loaded the viewer still shows the previous photo's model until Generate builds one:
+ * it is dimmed, and comparing or exporting it is disabled.
+ */
+function updateModelState() {
+  const stale = !state.result && !!viewer;
+  $('stage').classList.toggle('stale', stale);
+  const note = $('stale-note');
+  note.hidden = !stale;
+  note.innerHTML =
+    state.busy || buildQueued
+      ? 'This is the previous photo’s model. Building one for the new photo…'
+      : 'This is the previous photo’s model. Press <b>Generate</b> to build one for the new photo.';
+  const compare = $('compare-btn') as HTMLButtonElement;
+  if (stale && compare.getAttribute('aria-pressed') === 'true') {
+    compare.setAttribute('aria-pressed', 'false');
+    $('compare-bar').hidden = true;
+    viewer?.setCompare(false);
+  }
+  compare.disabled = stale;
+  document.querySelectorAll<HTMLButtonElement>('[data-export]').forEach((b) => (b.disabled = stale));
+}
 
 /** How far the toolbar and stats (top) and the compare and export bars (bottom) reach into the 3D view; on phones they sit outside it. */
 function stageInsets() {
@@ -1220,7 +1335,7 @@ function wireToolbar() {
       } catch (e) {
         toast(`Export failed: ${(e as Error).message}`, 'error');
       } finally {
-        b.disabled = false;
+        b.disabled = !state.result;
       }
     };
   });
@@ -1329,10 +1444,7 @@ async function boot() {
   // ?sample=<id> opens a sample directly; the demo opens with the first one, already built.
   const wanted = new URLSearchParams(location.search).get('sample');
   const sample = state.samples.find((s) => s.id === wanted) ?? (DEMO ? state.samples[0] : undefined);
-  if (sample && !state.front) {
-    await loadSample(sample);
-    if (DEMO && state.front) await generate();
-  }
+  if (sample && !state.front) await openSample(sample);
 }
 
 // A small hook for automated tests and recordings; `ready` resolves once the page has finished opening.

@@ -776,6 +776,34 @@ input[type='range'] {
   color: var(--ok);
 }
 
+/* A new photo is loaded but not built yet: the previous model stays in view, dimmed. */
+.stage.stale .viewer {
+  opacity: 0.35;
+  filter: grayscale(0.7);
+}
+
+.stage.stale .stats {
+  opacity: 0.55;
+}
+
+.stale-note {
+  font-size: 12.5px;
+  color: var(--text);
+  background: rgba(20, 25, 34, 0.92);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 6px 10px;
+  max-width: 100%;
+}
+
+.stale-note b {
+  color: var(--accent);
+}
+
+.stale-note[hidden] {
+  display: none;
+}
+
 .exports {
   align-self: flex-end;
   display: flex;

@@ -8,6 +8,7 @@
 // tests/e2e/artifact-host.mjs: wrapped in a host skeleton, under a sub-path, strict CSP, no /api. Every request
 // outside that sub-path is blocked. AI stays off (?ai=0), so nothing needs network access.
 // Needs public/samples and docs/demo/groundtruth (npm run samples:render), ffmpeg with libx264 and Python 3 with Pillow.
+// DEMO_OUT_DIR=<dir> writes the media there instead of docs/demo (for trying changes to this script).
 
 import { spawn, spawnSync } from 'node:child_process';
 import { statSync } from 'node:fs';
@@ -18,8 +19,8 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from '@playwright/test';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const outDir = path.join(root, 'docs', 'demo');
-const truthDir = path.join(outDir, 'groundtruth');
+const outDir = process.env.DEMO_OUT_DIR ? path.resolve(process.env.DEMO_OUT_DIR) : path.join(root, 'docs', 'demo');
+const truthDir = path.join(root, 'docs', 'demo', 'groundtruth');
 
 const PORT = 5191;
 const ORIGIN = `http://127.0.0.1:${PORT}`;
@@ -310,13 +311,15 @@ async function waitModel(page, after) {
   );
 }
 
-/** Which sample file went into each reference slot, and which slots only shape the model. */
+/** Which sample file went into each reference slot, which slots only shape the model, and which use their image mirrored. */
 const slotSources = (page) =>
   page.evaluate(() => {
     const filled = [...document.querySelectorAll('.slot.filled')];
     return {
-      picks: Object.fromEntries(filled.map((s) => [s.dataset.view, (s.getAttribute('title') || '').replace(/^From: /, '')])),
+      // The tooltip's first line is the source; a second one may say why auto-pick put it there.
+      picks: Object.fromEntries(filled.map((s) => [s.dataset.view, (s.getAttribute('title') || '').split('\n')[0].replace(/^From: /, '')])),
       shapeOnly: filled.filter((s) => s.classList.contains('shape-only')).map((s) => s.dataset.view),
+      mirrored: filled.filter((s) => s.classList.contains('mirrored')).map((s) => s.dataset.view),
     };
   });
 
@@ -353,9 +356,16 @@ async function recordWalkthrough(browser, tmp, errors) {
     await page.evaluate(() => document.documentElement.classList.remove('demo-shot'));
     log('saved', name);
   };
-  const generate = async (id) => {
+  /** Picks a sample: the hosted demo loads it and builds its model straight away, auto-picking its reference views. */
+  const openSample = async (id, caption) => {
     const before = await generation(page);
-    await click('#generate-btn', 300);
+    await click(`#sample-buttons [data-sample="${id}"]`, 0);
+    // Off the panel, so scrolling it does not bring a result tile's hover menu up under the (hidden) mouse.
+    await page.mouse.move(VIEWPORT.width - 40, VIEWPORT.height / 2);
+    await waitRanked(page, id);
+    await say(caption);
+    await scrollPanel('#refs-card', 900);
+    await pause(1600);
     await mark(`${id}:generate`);
     // The auto-picked views land in the slots while the model is built.
     await scrollPanel('#slots', 1000);
@@ -363,10 +373,6 @@ async function recordWalkthrough(browser, tmp, errors) {
     await mark(`${id}:model`);
     // The progress overlay fades out 0.6 s after the model is done.
     await pause(900);
-  };
-  const loadSample = async (id) => {
-    await click(`#sample-buttons [data-sample="${id}"]`, 0);
-    await waitRanked(page, id);
   };
 
   // Hot sauce: the hosted demo builds it by itself as the page opens, so the video starts with that.
@@ -386,10 +392,10 @@ async function recordWalkthrough(browser, tmp, errors) {
   await say('Reference images (bundled studio renders of the same bottle), ranked by similarity');
   await scrollPanel('#refs-card', 1100);
   await pause(2800);
-  await say('Back and top images texture the model; the side image only sets its depth');
+  await say("Auto-picked: back, both sides and top. The bottle's two sides look alike, so each side image is oriented by matching its edges to the photo and the back image");
   await scrollPanel('#slots', 1000);
-  await pause(3000);
-  await say('Hidden sides are textured from the reference images');
+  await pause(3400);
+  await say('The back and both sides are textured from the reference images');
   await orbit(HOME_AZ, HOME_AZ + 360, HOME_EL, HOME_EL, 8000, true);
   await say(null);
   await orbit(HOME_AZ + 360, BACK_AZ + 360, HOME_EL, HOME_EL, 1700);
@@ -417,15 +423,11 @@ async function recordWalkthrough(browser, tmp, errors) {
   await pause(500);
   await mark('duck');
 
-  // Rubber duck: picked by the visitor, then generated.
+  // Rubber duck: picked by the visitor, which builds it.
   await scrollPanel(0, 900);
-  await say('A second sample: a rubber duck');
-  await loadSample('rubber-duck');
-  await pause(600);
-  await say('Generate picks the back, both sides and the top from its reference images');
-  await scrollPanel('#refs-card', 900);
-  await pause(2000);
-  await generate('rubber-duck');
+  await say('A second sample: a rubber duck. Picking it builds its model');
+  await pause(1200);
+  await openSample('rubber-duck', 'Its back, both sides and top are auto-picked from its bundled reference images');
   await say(null);
   await hideCursor();
   await shot('duck-model.png');
@@ -542,18 +544,16 @@ async function captureComparisons(browser, tmp, cameras, samples, errors) {
   for (const sample of samples) {
     const { id } = sample;
     log(`comparison: ${id}`);
+    // 1) The normal flow: picking a sample builds it, auto-picking the reference views.
+    let before = await generation(page);
     await page.locator(`#sample-buttons [data-sample="${id}"]`).click();
+    await waitModel(page, before);
     await waitRanked(page, id);
     const ranking = await page.evaluate(() =>
       window.__trueform.state.candidates
         .filter((c) => c.score)
         .map((c) => ({ file: c.result.url, view: c.score.view, similarity: Math.round(c.score.similarity * 1000) / 1000 })),
     );
-
-    // 1) The normal flow: Generate auto-picks the reference views.
-    let before = await generation(page);
-    await page.click('#generate-btn');
-    await waitModel(page, before);
     const withRefs = { stats: await statsText(page), ...(await slotSources(page)) };
     const refsCapture = await captureViews(page, cam);
     withRefs.files = await saveShots(refsCapture.shots, tmp, `${id}-refs`);
@@ -807,7 +807,9 @@ json.dump(metrics, sys.stdout)
 function composeGrids(results, cameras, tmp) {
   const cam = cameras.camera;
   const views = (r) => {
-    const texture = Object.keys(r.withRefs.picks).filter((v) => !r.withRefs.shapeOnly.includes(v));
+    const texture = Object.keys(r.withRefs.picks)
+      .filter((v) => !r.withRefs.shapeOnly.includes(v))
+      .map((v) => (r.withRefs.mirrored.includes(v) ? `${v} (mirrored)` : v));
     const shape = r.withRefs.shapeOnly.length ? `; shape only (depth, no texture): ${r.withRefs.shapeOnly.join(', ')}` : '';
     return `Reference images auto-picked from the bundled samples: ${texture.join(', ') || 'none'} for texture${shape}.`;
   };
@@ -885,6 +887,7 @@ async function main() {
           stats: r.withRefs.stats,
           picks: r.withRefs.picks,
           shapeOnly: r.withRefs.shapeOnly,
+          mirrored: r.withRefs.mirrored,
           size: normSize(r.withRefs.size),
           iou: metrics[r.id].refs,
           meanIou: metrics[r.id].mean.refs,
@@ -902,11 +905,12 @@ async function main() {
 
     const files = ['demo.mp4', 'demo.gif', '01-sample-loaded.png', '02-model.png', '03-back.png', '04-compare.png', '05-phone.png', 'duck-model.png', 'duck-back.png', ...results.map((r) => `comparison-${r.id}.png`), 'comparison.json'];
     console.log('\nFiles:');
-    for (const f of files) console.log(`  docs/demo/${f.padEnd(26)} ${((await stat(path.join(outDir, f))).size / 1e6).toFixed(2)} MB`);
+    for (const f of files) console.log(`  ${path.relative(root, path.join(outDir, f)).padEnd(36)} ${((await stat(path.join(outDir, f))).size / 1e6).toFixed(2)} MB`);
     console.log(`\nVideo: ${map(duration).toFixed(1)} s from ${duration.toFixed(1)} s recorded (GIF: first ${map(times.duck).toFixed(1)} s at ${gif.fps} fps, ${gif.colors} colours)`);
     for (const s of report.samples) {
       console.log(`\n${s.id}`);
-      console.log(`  auto-picked: ${Object.entries(s.withRefs.picks).map(([k, v]) => `${k} <- ${v}${s.withRefs.shapeOnly.includes(k) ? ' (shape only)' : ''}`).join(', ') || 'none'}`);
+      const flags = (k) => `${s.withRefs.shapeOnly.includes(k) ? ' (shape only)' : ''}${s.withRefs.mirrored.includes(k) ? ' (mirrored)' : ''}`;
+      console.log(`  auto-picked: ${Object.entries(s.withRefs.picks).map(([k, v]) => `${k} <- ${v}${flags(k)}`).join(', ') || 'none'}`);
       console.log(`  with refs:   ${s.withRefs.stats}`);
       console.log(`  photo only:  ${s.photoOnly.stats}`);
       console.log(`  size (w x h x d, height 1): truth ${s.truthSize.x} x 1 x ${s.truthSize.z}, refs ${s.withRefs.size.x} x 1 x ${s.withRefs.size.z}, photo only ${s.photoOnly.size.x} x 1 x ${s.photoOnly.size.z}`);

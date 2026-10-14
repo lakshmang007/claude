@@ -69,3 +69,53 @@ test('the hosted demo opens with a finished model built from the bundled sample'
   expect(apiCalls).toEqual([]);
   expect(errors).toEqual([]);
 });
+
+type Hook = { __trueform: { state: { generation: number; busy: boolean; result: unknown } } };
+
+test('the hosted demo builds a sample as soon as it is picked, downloading each of its images once', async ({ page }) => {
+  test.slow();
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  // The host sends no cache headers, so an image shown again would be downloaded again.
+  const downloads = new Map<string, number>();
+  page.on('request', (r) => {
+    const file = new URL(r.url()).pathname;
+    if (/\/samples\/.+\.(jpe?g|png|webp)$/.test(file)) downloads.set(file, (downloads.get(file) ?? 0) + 1);
+  });
+  await page.goto(HOSTED);
+  const stats = page.locator('#stats');
+  await expect(stats).toContainText('watertight', { timeout: 90_000 });
+  await expect(page.locator('#sample-buttons button.active')).toHaveText('Hot sauce bottle');
+  // The bottle looks the same from either side, so both side images texture it, each the way round its side is seen.
+  await expect(stats).toContainText('reference views (sample): back, left, right, top ·');
+  await expect(page.locator('.slot[data-view="left"]')).toHaveAttribute('title', /hot-sauce\/left\.jpg/);
+  await expect(page.locator('.slot[data-view="right"]')).toHaveAttribute('title', /hot-sauce\/right\.jpg/);
+  await expect(page.locator('.slot.mirrored, .slot.shape-only')).toHaveCount(0);
+
+  const before = await page.evaluate(() => (window as unknown as Hook).__trueform.state.generation);
+  await page.locator('#sample-buttons [data-sample="rubber-duck"]').click();
+  // The bottle stays in view, dimmed, until the duck is built; it cannot be exported or compared meanwhile.
+  await expect(page.locator('#stale-note')).toBeVisible();
+  await expect(page.locator('[data-export="glb"]')).toBeDisabled();
+  await expect(page.locator('#compare-btn')).toBeDisabled();
+  await page.waitForFunction(
+    (before) => {
+      const s = (window as unknown as Hook).__trueform.state;
+      return s.generation > before && !s.busy && !!s.result;
+    },
+    before,
+    { timeout: 90_000 },
+  );
+  await expect(page.locator('#stale-note')).toBeHidden();
+  await expect(page.locator('[data-export="glb"]')).toBeEnabled();
+  // Each side image goes to the end it shows: the head-on view to the head (left), the rear view to the tail.
+  await expect(stats).toContainText('reference views (sample): back, left, right, top ·');
+  await expect(page.locator('.slot[data-view="left"]')).toHaveAttribute('title', /rubber-duck\/left\.jpg/);
+  await expect(page.locator('.slot[data-view="right"]')).toHaveAttribute('title', /rubber-duck\/right\.jpg/);
+  await expect(page.locator('.slot.mirrored, .slot.shape-only')).toHaveCount(0);
+
+  // Both photos and all 14 reference images, each downloaded once (twice at most), however often the lists re-render.
+  expect(downloads.size).toBe(16);
+  expect([...downloads].filter(([, n]) => n > 2)).toEqual([]);
+  expect(errors).toEqual([]);
+});
