@@ -1,6 +1,7 @@
 import { Capacitor } from '@capacitor/core';
 import { Directory, Encoding, Filesystem } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
+import { isDemo } from './install';
 
 /**
  * Hands a text file to the person: a download in the browser, the share sheet
@@ -8,6 +9,7 @@ import { Share } from '@capacitor/share';
  * Files, Drive, email or a chat.
  */
 export async function saveTextFile(name: string, content: string, mime: string): Promise<void> {
+  if (isDemo) throw new Error('files can\'t be saved from this preview. They can from the installed app.');
   if (Capacitor.isNativePlatform()) {
     const { uri } = await Filesystem.writeFile({ path: name, data: content, directory: Directory.Cache, encoding: Encoding.UTF8 });
     try {

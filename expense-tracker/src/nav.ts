@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { TxType } from './types';
 
 export type Tab = 'home' | 'transactions' | 'stats' | 'settings';
@@ -15,6 +15,25 @@ interface NavState {
   overHome?: boolean;
 }
 
+// Some embedding frames refuse history changes. The app then runs on its own state, without Back support.
+let historyWorks = true;
+
+function push(state: NavState) {
+  try {
+    history.pushState(state, '');
+  } catch {
+    historyWorks = false;
+  }
+}
+
+function replace(state: NavState) {
+  try {
+    history.replaceState(state, '');
+  } catch {
+    historyWorks = false;
+  }
+}
+
 function read(state: unknown): NavState {
   const s = (state ?? {}) as Partial<NavState>;
   return { tab: TABS.includes(s.tab as Tab) ? (s.tab as Tab) : 'home', overlay: s.overlay ?? null, overHome: s.overHome };
@@ -26,41 +45,47 @@ function read(state: unknown): NavState {
  */
 export function useNav() {
   const [nav, setNav] = useState<NavState>(() => ({ ...read(history.state), overlay: null }));
+  const latest = useRef(nav);
+  latest.current = nav;
+  const current = () => (historyWorks ? read(history.state) : latest.current);
 
   useEffect(() => {
     // A sheet left open before a reload is not reopened.
-    history.replaceState({ ...read(history.state), overlay: null }, '');
+    replace({ ...read(history.state), overlay: null });
     const onPop = (event: PopStateEvent) => setNav(read(event.state));
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
   const goTab = useCallback((tab: Tab) => {
-    const current = read(history.state);
-    if (tab === current.tab) {
+    const now = current();
+    if (tab === now.tab) {
       window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
-    if (tab === 'home' && current.overHome) {
+    if (tab === 'home' && now.overHome && historyWorks) {
+      // Switch now; the popstate that follows lands on the same Home entry. Some frames ignore back().
+      setNav({ tab: 'home', overlay: null });
       history.back();
       return;
     }
-    const next: NavState = { tab, overlay: null, overHome: tab !== 'home' && (current.tab === 'home' || current.overHome) };
-    if (current.tab === 'home') history.pushState(next, '');
-    else history.replaceState(next, '');
+    const next: NavState = { tab, overlay: null, overHome: tab !== 'home' && (now.tab === 'home' || now.overHome) };
+    if (now.tab === 'home') push(next);
+    else replace(next);
     setNav(next);
     window.scrollTo({ top: 0 });
   }, []);
 
   const open = useCallback((overlay: Overlay) => {
-    const next = { ...read(history.state), overlay };
-    history.pushState(next, '');
+    const next = { ...current(), overlay };
+    push(next);
     setNav(next);
   }, []);
 
   const close = useCallback(() => {
-    if (read(history.state).overlay) history.back();
-    else setNav((current) => ({ ...current, overlay: null }));
+    // Close now; back() then drops the sheet's history entry where the frame allows it.
+    setNav((now) => ({ ...now, overlay: null }));
+    if (historyWorks && read(history.state).overlay) history.back();
   }, []);
 
   return { tab: nav.tab, overlay: nav.overlay, goTab, open, close };

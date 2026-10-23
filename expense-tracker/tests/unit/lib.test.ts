@@ -216,6 +216,16 @@ describe('storage', () => {
     expect(saveData(createInitialData('INR'), storage)).toBe(false);
   });
 
+  it('copes with storage that is missing or refuses access', () => {
+    expect(loadData(null).transactions).toEqual([]);
+    expect(saveData(createInitialData('INR'), null)).toBe(false);
+    const blocked = new MemoryStorage();
+    blocked.getItem = () => {
+      throw new DOMException('denied', 'SecurityError');
+    };
+    expect(loadData(blocked).categories.length).toBe(DEFAULT_CATEGORIES.length);
+  });
+
   it('keeps an unreadable copy rather than losing it', () => {
     const storage = new MemoryStorage();
     storage.setItem(STORAGE_KEY, '{broken');

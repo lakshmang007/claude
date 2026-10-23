@@ -84,10 +84,19 @@ export function sanitize(raw: unknown): AppData {
   };
 }
 
-export function loadData(storage: Storage = localStorage): AppData {
+/** The browser's localStorage, or null where reading it throws (blocked or sandboxed storage). */
+function browserStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+export function loadData(storage: Storage | null = browserStorage()): AppData {
   let stored: string | null = null;
   try {
-    stored = storage.getItem(STORAGE_KEY);
+    stored = storage?.getItem(STORAGE_KEY) ?? null;
   } catch {
     return createInitialData();
   }
@@ -97,7 +106,7 @@ export function loadData(storage: Storage = localStorage): AppData {
   } catch {
     // Keep the unreadable copy rather than overwrite it with an empty ledger.
     try {
-      storage.setItem(`${STORAGE_KEY}:unreadable-${Date.now()}`, stored);
+      storage?.setItem(`${STORAGE_KEY}:unreadable-${Date.now()}`, stored);
     } catch {
       // Nothing more can be done without space.
     }
@@ -106,7 +115,8 @@ export function loadData(storage: Storage = localStorage): AppData {
 }
 
 /** Returns false when the browser refuses to store (full, or storage disabled). */
-export function saveData(data: AppData, storage: Storage = localStorage): boolean {
+export function saveData(data: AppData, storage: Storage | null = browserStorage()): boolean {
+  if (!storage) return false;
   try {
     storage.setItem(STORAGE_KEY, JSON.stringify(data));
     return true;

@@ -62,6 +62,7 @@ npm run typecheck
 npm test             # unit tests (Vitest)
 npm run test:e2e     # the built app in an emulated Pixel 7 (Playwright)
 npm run build        # static site in dist/
+npm run build:demo   # one self-contained page, dist-demo/expense-tracker.html, for an online preview
 ```
 
 Build the APK on your computer (needs Android Studio, or the Android SDK and JDK 21):

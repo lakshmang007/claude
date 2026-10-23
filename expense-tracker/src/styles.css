@@ -412,6 +412,15 @@ input[aria-invalid='true'] {
   font-size: 0.92rem;
 }
 
+/* The preview's host frame already pads the page clear of the status bar. */
+.demo .screen {
+  padding-top: 12px;
+}
+
+a.btn {
+  text-decoration: none;
+}
+
 /* Month switcher */
 
 .month-switcher {

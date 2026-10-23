@@ -66,10 +66,18 @@ self.addEventListener('fetch', (event) => {
 
 const { version } = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { version: string };
 
-export default defineConfig({
-  // Relative URLs: the same build runs from GitHub Pages' sub-path and inside the Android app.
-  base: './',
-  define: { __APP_VERSION__: JSON.stringify(version) },
-  plugins: [react(), serviceWorker()],
-  build: { target: 'es2022' },
+export default defineConfig(({ mode }) => {
+  // `--mode demo` builds one script and one stylesheet for scripts/build-demo-page.mjs to inline.
+  const demo = mode === 'demo';
+  return {
+    // Relative URLs: the same build runs from GitHub Pages' sub-path and inside the Android app.
+    base: './',
+    define: { __APP_VERSION__: JSON.stringify(version) },
+    plugins: demo ? [react()] : [react(), serviceWorker()],
+    publicDir: demo ? false : 'public',
+    build: {
+      target: 'es2022',
+      ...(demo ? { outDir: 'dist-demo', rollupOptions: { output: { inlineDynamicImports: true } } } : {}),
+    },
+  };
 });

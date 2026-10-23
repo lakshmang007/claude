@@ -7,6 +7,12 @@ interface BeforeInstallPromptEvent extends Event {
 
 export const isNative = Capacitor.isNativePlatform();
 
+/** The single-file preview build (`npm run build:demo`), which runs inside a locked-down frame. */
+export const isDemo = import.meta.env.MODE === 'demo';
+
+/** Where the newest Android build is published by the workflow. */
+export const APK_RELEASE_URL = 'https://github.com/lakshmang007/claude/releases/tag/expense-tracker-latest';
+
 export function isStandalone(): boolean {
   return isNative || window.matchMedia('(display-mode: standalone)').matches || (navigator as { standalone?: boolean }).standalone === true;
 }

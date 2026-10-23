@@ -7,7 +7,7 @@ import { toCSV } from '../lib/csv';
 import { todayISO } from '../lib/dates';
 import { createInitialData } from '../lib/defaults';
 import { saveTextFile } from '../lib/files';
-import { canPromptInstall, isIOS, isStandalone, onInstallChange, promptInstall } from '../lib/install';
+import { APK_RELEASE_URL, canPromptInstall, isDemo, isIOS, isStandalone, onInstallChange, promptInstall } from '../lib/install';
 import { amountToInput, currencyLabel, CURRENCIES, parseAmount } from '../lib/money';
 import { SAMPLE_PREFIX } from '../lib/sample';
 import { parseBackup, serializeBackup } from '../lib/storage';
@@ -143,7 +143,20 @@ export function Settings({ openCategory }: ScreenProps) {
         <h1>Settings</h1>
       </header>
 
-      {!isStandalone() && (installable || isIOS()) && (
+      {isDemo && (
+        <section className="card install">
+          <Icon name="phone" />
+          <div>
+            <h2>This is a preview</h2>
+            <p>Entries you make here stay in this browser. Backup and CSV export only work in the installed app.</p>
+            <a className="btn btn-primary" href={APK_RELEASE_URL} target="_blank" rel="noreferrer">
+              Get the Android app
+            </a>
+          </div>
+        </section>
+      )}
+
+      {!isDemo && !isStandalone() && (installable || isIOS()) && (
         <section className="card install">
           <Icon name="phone" />
           <div>
