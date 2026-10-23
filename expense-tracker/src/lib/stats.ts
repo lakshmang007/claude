@@ -1,5 +1,6 @@
-import type { Category, Saving, Transaction, TxType } from '../types';
-import { currentMonth, daysInMonth, monthOf, shiftMonth, todayISO } from './dates';
+import type { Category, Debt, Saving, Transaction, TxType } from '../types';
+import { currentMonth, daysInMonth, monthOf, parseISODate, shiftMonth, todayISO, toISODate } from './dates';
+import { debtCashEvents } from './people';
 import { SCALE } from './money';
 
 export interface Totals {
@@ -102,23 +103,68 @@ export function newestFirst(a: Transaction, b: Transaction): number {
   return a.date < b.date ? 1 : a.date > b.date ? -1 : b.createdAt - a.createdAt;
 }
 
-const signed = (tx: Transaction) => (tx.type === 'income' ? tx.amount : -tx.amount);
-
-/** Money on hand today: the opening balance plus every entry dated today or earlier. */
-export function balanceNow(transactions: Transaction[], openingBalance: number, now = new Date()): number {
-  const today = todayISO(now);
-  return transactions.reduce((sum, tx) => (tx.date <= today ? sum + signed(tx) : sum), openingBalance);
+interface CashEvent {
+  id: string;
+  date: string;
+  createdAt: number;
+  /** What it added to (positive) or took off (negative) "money you have". */
+  delta: number;
 }
 
-/** The money left after each entry, taking entries in date order (then the order they were added). */
-export function runningBalances(transactions: Transaction[], openingBalance: number): Map<string, number> {
+/** Everything that moved "money you have": entries, and money lent or borrowed and paid back. */
+function cashEvents(transactions: Transaction[], debts: Debt[]): CashEvent[] {
+  return [
+    ...transactions.map((tx) => ({ id: tx.id, date: tx.date, createdAt: tx.createdAt, delta: tx.type === 'income' ? tx.amount : -tx.amount })),
+    ...debts.flatMap(debtCashEvents),
+  ];
+}
+
+/** Money on hand today: the opening balance plus everything dated today or earlier. */
+export function balanceNow(
+  transactions: Transaction[],
+  openingBalance: number,
+  { debts = [], now = new Date() }: { debts?: Debt[]; now?: Date } = {},
+): number {
+  const today = todayISO(now);
+  return cashEvents(transactions, debts).reduce((sum, event) => (event.date <= today ? sum + event.delta : sum), openingBalance);
+}
+
+/**
+ * The money left after each entry (and each debt or payment that moved money), by id, taking
+ * them in date order, then the order they were added.
+ */
+export function runningBalances(transactions: Transaction[], openingBalance: number, debts: Debt[] = []): Map<string, number> {
   const after = new Map<string, number>();
   let balance = openingBalance;
-  for (const tx of [...transactions].sort((a, b) => newestFirst(b, a))) {
-    balance += signed(tx);
-    after.set(tx.id, balance);
+  const events = cashEvents(transactions, debts).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.createdAt - b.createdAt));
+  for (const event of events) {
+    balance += event.delta;
+    after.set(event.id, balance);
   }
   return after;
+}
+
+/** Totals for each day of a month that has entries, by YYYY-MM-DD. */
+export function dailyTotals(transactions: Transaction[], month: string): Map<string, Totals> {
+  const days = new Map<string, Transaction[]>();
+  for (const tx of transactions) {
+    if (monthOf(tx.date) !== month) continue;
+    days.set(tx.date, [...(days.get(tx.date) ?? []), tx]);
+  }
+  return new Map([...days].map(([date, list]) => [date, totalsFor(list)]));
+}
+
+export interface DayPoint extends Totals {
+  date: string;
+}
+
+/** The `count` days ending with `lastDay`, oldest first. */
+export function dailySeries(transactions: Transaction[], lastDay: string, count: number): DayPoint[] {
+  const end = parseISODate(lastDay);
+  const days = Array.from({ length: count }, (_, i) => toISODate(new Date(end.getFullYear(), end.getMonth(), end.getDate() - count + 1 + i)));
+  const grouped = new Map<string, Transaction[]>(days.map((d) => [d, []]));
+  for (const tx of transactions) grouped.get(tx.date)?.push(tx);
+  return days.map((date) => ({ date, ...totalsFor(grouped.get(date) ?? []) }));
 }
 
 export interface DayGroup {

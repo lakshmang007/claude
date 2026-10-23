@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react';
-import type { CategoryShare, MonthPoint } from '../lib/stats';
+import type { CategoryShare } from '../lib/stats';
 import { budgetLevel } from '../lib/stats';
-import { monthLabel } from '../lib/dates';
+import { dayLabel, daysInMonth, monthLabel, todayISO } from '../lib/dates';
 import { formatMoney, SCALE } from '../lib/money';
 import { Icon } from './Icon';
 
@@ -73,17 +73,31 @@ function columnPath(x: number, y: number, width: number, base: number): string {
   return `M${x},${base}V${y + r}Q${x},${y} ${x + r},${y}H${x + width - r}Q${x + width},${y} ${x + width},${y + r}V${base}Z`;
 }
 
-/** Monthly spending as columns; the selected month is the accent and carries the only value label. */
-export function MonthlyColumns({
+export interface ColumnPoint {
+  key: string;
+  /** Under the column: "Oct", "Mon". */
+  label: string;
+  /** Full name for the tooltip: "October 2026", "Mon, 20 Oct". */
+  title: string;
+  /** Spending, in hundredths. */
+  value: number;
+  /** More lines for the tooltip. */
+  details?: string[];
+}
+
+/** Spending as columns; the selected one is the accent and carries the only value label. */
+export function ColumnChart({
   points,
   selected,
   currency,
   onSelect,
+  label,
 }: {
-  points: MonthPoint[];
+  points: ColumnPoint[];
   selected: string;
   currency: string;
-  onSelect: (month: string) => void;
+  onSelect: (key: string) => void;
+  label: string;
 }) {
   const [ref, width] = useWidth<HTMLDivElement>();
   const [hover, setHover] = useState<string | null>(null);
@@ -92,18 +106,18 @@ export function MonthlyColumns({
   const bottom = 24;
   const left = 44;
   const base = height - bottom;
-  const { top: maxUnits, step } = niceScale(Math.max(...points.map((p) => p.expense)) / SCALE);
+  const { top: maxUnits, step } = niceScale(Math.max(...points.map((p) => p.value)) / SCALE);
   const ticks = Array.from({ length: Math.round(maxUnits / step) + 1 }, (_, i) => i * step);
   const plot = Math.max(0, width - left);
   const band = points.length ? plot / points.length : 0;
   const barWidth = Math.min(24, band * 0.5);
   const y = (units: number) => base - (units / maxUnits) * (base - top);
-  const hovered = points.find((p) => p.month === hover);
+  const hovered = points.find((p) => p.key === hover);
 
   return (
     <div className="columns" ref={ref}>
       {width > 0 && (
-        <svg width={width} height={height} role="img" aria-label="Spending in each of the last months">
+        <svg width={width} height={height} role="img" aria-label={label}>
           {ticks.map((tick) => (
             <g key={tick}>
               <line className={tick === 0 ? 'axis-base' : 'grid'} x1={left} x2={width} y1={y(tick)} y2={y(tick)} />
@@ -114,27 +128,27 @@ export function MonthlyColumns({
           ))}
           {points.map((point, i) => {
             const cx = left + band * i + band / 2;
-            const units = point.expense / SCALE;
-            const isSelected = point.month === selected;
+            const units = point.value / SCALE;
+            const isSelected = point.key === selected;
             return (
               <g
-                key={point.month}
+                key={point.key}
                 className="column-hit"
-                onClick={() => onSelect(point.month)}
-                onPointerEnter={(event) => event.pointerType === 'mouse' && setHover(point.month)}
+                onClick={() => onSelect(point.key)}
+                onPointerEnter={(event) => event.pointerType === 'mouse' && setHover(point.key)}
                 onPointerLeave={() => setHover(null)}
               >
                 <rect x={cx - band / 2} y={top - 20} width={band} height={height - top + 20} fill="transparent" />
                 <path className={isSelected ? 'column selected' : 'column'} d={columnPath(cx - barWidth / 2, y(units), barWidth, base)} />
-                {isSelected && point.expense > 0 && (
+                {isSelected && point.value > 0 && (
                   <text className="column-value" x={cx} y={y(units) - 6} textAnchor="middle">
-                    {formatMoney(point.expense, currency, { compact: true })}
+                    {formatMoney(point.value, currency, { compact: true })}
                   </text>
                 )}
                 <text className={isSelected ? 'tick tick-selected' : 'tick'} x={cx} y={height - 6} textAnchor="middle">
-                  {monthLabel(point.month, 'short')}
+                  {point.label}
                 </text>
-                <title>{`${monthLabel(point.month)}: spent ${formatMoney(point.expense, currency)}`}</title>
+                <title>{`${point.title}: spent ${formatMoney(point.value, currency)}`}</title>
               </g>
             );
           })}
@@ -146,13 +160,106 @@ export function MonthlyColumns({
           style={{ left: Math.min(Math.max(left + band * points.indexOf(hovered) + band / 2, 80), width - 80) }}
           role="presentation"
         >
-          <strong>{monthLabel(hovered.month)}</strong>
-          <span>Spent {formatMoney(hovered.expense, currency)}</span>
-          <span>Earned {formatMoney(hovered.income, currency)}</span>
+          <strong>{hovered.title}</strong>
+          <span>Spent {formatMoney(hovered.value, currency)}</span>
+          {hovered.details?.map((line) => (
+            <span key={line}>{line}</span>
+          ))}
         </div>
       )}
     </div>
   );
+}
+
+export type HeatLevel = 0 | 1 | 2 | 3 | 4;
+
+/** Four steps of one hue by share of the busiest day; zero stays empty. */
+export function heatLevel(value: number, max: number): HeatLevel {
+  if (value <= 0 || max <= 0) return 0;
+  return Math.min(4, Math.max(1, Math.ceil((value / max) * 4))) as HeatLevel;
+}
+
+/**
+ * A month as a calendar: each day shows what was spent, shaded by how much. Tapping a day
+ * selects it. Weeks start on the locale's first day.
+ */
+export function MonthCalendar({
+  month,
+  spent,
+  selected,
+  currency,
+  onSelect,
+}: {
+  month: string;
+  /** Spending per YYYY-MM-DD. */
+  spent: Map<string, number>;
+  selected: string | null;
+  currency: string;
+  onSelect: (date: string) => void;
+}) {
+  const [year, monthIndex] = month.split('-').map(Number);
+  const firstDay = weekStart();
+  const offset = (new Date(year, monthIndex - 1, 1).getDay() - (firstDay % 7) + 7) % 7;
+  const days = daysInMonth(month);
+  const today = todayISO();
+  const max = Math.max(0, ...spent.values());
+  const weekdays = Array.from({ length: 7 }, (_, i) =>
+    new Intl.DateTimeFormat(undefined, { weekday: 'narrow' }).format(new Date(2024, 0, 7 + ((firstDay + i) % 7))),
+  );
+
+  return (
+    <div className="calendar">
+      <div className="calendar-grid" role="group" aria-label={`Spending each day of ${monthLabel(month)}`}>
+        {weekdays.map((name, i) => (
+          <span key={i} className="calendar-weekday" aria-hidden="true">
+            {name}
+          </span>
+        ))}
+        {Array.from({ length: offset }, (_, i) => (
+          <span key={`blank-${i}`} aria-hidden="true" />
+        ))}
+        {Array.from({ length: days }, (_, i) => {
+          const date = `${month}-${String(i + 1).padStart(2, '0')}`;
+          const value = spent.get(date) ?? 0;
+          const level = heatLevel(value, max);
+          return (
+            <button
+              key={date}
+              className={`calendar-day heat-${level} ${date === selected ? 'selected' : ''} ${date === today ? 'today' : ''}`}
+              onClick={() => onSelect(date)}
+              aria-label={`${dayLabel(date)}: ${value ? `spent ${formatMoney(value, currency)}` : 'nothing spent'}`}
+              aria-pressed={date === selected}
+              disabled={date > today}
+            >
+              <span className="calendar-date">{i + 1}</span>
+              {value > 0 && <span className="calendar-amount">{formatMoney(value, currency, { compact: true })}</span>}
+            </button>
+          );
+        })}
+      </div>
+      <div className="calendar-legend" aria-hidden="true">
+        <span>Less</span>
+        {([1, 2, 3, 4] as const).map((level) => (
+          <span key={level} className={`calendar-swatch heat-${level}`} />
+        ))}
+        <span>More</span>
+      </div>
+    </div>
+  );
+}
+
+/** The first day of the week for the person's locale, 0 = Sunday … 6 = Saturday (default Monday). */
+function weekStart(): number {
+  try {
+    const locale = new Intl.Locale(navigator.language) as Intl.Locale & {
+      getWeekInfo?: () => { firstDay: number };
+      weekInfo?: { firstDay: number };
+    };
+    const firstDay = locale.getWeekInfo?.().firstDay ?? locale.weekInfo?.firstDay;
+    return firstDay ? firstDay % 7 : 1;
+  } catch {
+    return 1;
+  }
 }
 
 /** Spending against a limit. The fill turns warning at 80% and critical past 100%, always with a label. */

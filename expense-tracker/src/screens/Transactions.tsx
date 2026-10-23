@@ -2,12 +2,13 @@ import { useMemo } from 'react';
 import type { ScreenProps } from '../App';
 import { Icon } from '../components/Icon';
 import { MonthSwitcher } from '../components/MonthSwitcher';
+import { ScreenHeader } from '../components/ScreenHeader';
 import { TransactionList } from '../components/TransactionList';
 import { formatMoney } from '../lib/money';
 import { filterTransactions, totalsFor } from '../lib/stats';
 import { useStore } from '../store';
 
-export function Transactions({ month, setMonth, openTransaction, filter, setFilter }: ScreenProps) {
+export function Transactions({ month, setMonth, openTransaction, filter, setFilter, goTab }: ScreenProps) {
   const { transactions, categories, settings } = useStore().data;
   const list = useMemo(
     () => filterTransactions(transactions, categories, { ...filter, month: filter.allTime ? null : month }),
@@ -19,9 +20,7 @@ export function Transactions({ month, setMonth, openTransaction, filter, setFilt
 
   return (
     <div className="screen-inner">
-      <header className="screen-header">
-        <h1>History</h1>
-      </header>
+      <ScreenHeader title="History" onSettings={() => goTab('settings')} />
 
       <div className="search">
         <Icon name="search" size={18} />

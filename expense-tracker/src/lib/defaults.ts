@@ -38,6 +38,7 @@ export function createInitialData(currency = guessCurrency()): AppData {
     categories: DEFAULT_CATEGORIES.map((category) => ({ ...category })),
     categoryBudgets: {},
     savings: [],
+    debts: [],
     settings: { currency, theme: 'system', monthlyBudget: null, openingBalance: 0 },
   };
 }

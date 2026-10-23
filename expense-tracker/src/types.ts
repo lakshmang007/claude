@@ -34,6 +34,38 @@ export interface Saving {
   createdAt: number;
 }
 
+/** `lent`: they have to give money back to you. `borrowed`: you have to give money to them. */
+export type DebtKind = 'lent' | 'borrowed';
+
+/** Money paid back on a debt: received from them when you lent, paid to them when you borrowed. */
+export interface DebtPayment {
+  id: string;
+  /** Integer hundredths, always positive. */
+  amount: number;
+  /** Local calendar date, YYYY-MM-DD. */
+  date: string;
+  /** The money went into or out of "money you have". */
+  cash: boolean;
+  createdAt: number;
+}
+
+/** A note of money owed between the person and someone else. */
+export interface Debt {
+  id: string;
+  /** Who: a name as the person writes it. */
+  person: string;
+  kind: DebtKind;
+  /** Integer hundredths, always positive. */
+  amount: number;
+  /** Local calendar date, YYYY-MM-DD. */
+  date: string;
+  note: string;
+  /** The money changed hands when this was noted, so it moved "money you have". */
+  cash: boolean;
+  payments: DebtPayment[];
+  createdAt: number;
+}
+
 export type ThemePref = 'system' | 'light' | 'dark';
 
 export interface Settings {
@@ -57,5 +89,7 @@ export interface AppData {
   categoryBudgets: Record<string, number>;
   /** Skipped cravings, the savings jar. */
   savings: Saving[];
+  /** Money to give to people and to get back from them. */
+  debts: Debt[];
   settings: Settings;
 }

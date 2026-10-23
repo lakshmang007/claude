@@ -1,4 +1,4 @@
-import type { Saving, Transaction } from '../types';
+import type { Debt, Saving, Transaction } from '../types';
 import { todayISO } from './dates';
 import { SCALE } from './money';
 
@@ -79,4 +79,25 @@ export function sampleSavings(currency: string, now = new Date()): Saving[] {
     const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo);
     return { id: `${SAMPLE_PREFIX}saving-${i + 1}`, item, amount: sampleAmount(rupees, currency), date: todayISO(date), createdAt: date.getTime() + i };
   });
+}
+
+/** A few friends: one paying back in parts, one you owe, one settled. */
+export function sampleDebts(currency: string, now = new Date()): Debt[] {
+  const day = (daysAgo: number) => {
+    const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo);
+    return { date: todayISO(date), createdAt: date.getTime() };
+  };
+  const money = (rupees: number) => sampleAmount(rupees, currency);
+  return [
+    {
+      id: `${SAMPLE_PREFIX}debt-1`, person: 'Rahul', kind: 'lent', amount: money(500), note: 'Concert ticket', cash: true, ...day(6),
+      payments: [{ id: `${SAMPLE_PREFIX}payment-1`, amount: money(200), cash: true, ...day(2) }],
+    },
+    { id: `${SAMPLE_PREFIX}debt-2`, person: 'Priya', kind: 'borrowed', amount: money(300), note: 'Lunch she paid for', cash: false, ...day(3), payments: [] },
+    { id: `${SAMPLE_PREFIX}debt-3`, person: 'Aman', kind: 'lent', amount: money(150), note: 'Auto fare', cash: true, ...day(1), payments: [] },
+    {
+      id: `${SAMPLE_PREFIX}debt-4`, person: 'Sneha', kind: 'lent', amount: money(250), note: 'Books', cash: true, ...day(20),
+      payments: [{ id: `${SAMPLE_PREFIX}payment-2`, amount: money(250), cash: true, ...day(15) }],
+    },
+  ];
 }

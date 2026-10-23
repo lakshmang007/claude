@@ -3,13 +3,17 @@ import type { ScreenProps } from '../App';
 import { BudgetMeter, CategoryBars } from '../components/Charts';
 import { Icon } from '../components/Icon';
 import { MonthSwitcher } from '../components/MonthSwitcher';
+import { ScreenHeader } from '../components/ScreenHeader';
 import { TransactionList } from '../components/TransactionList';
 import { formatMoney, currencyLabel, CURRENCIES } from '../lib/money';
-import { sampleOpeningBalance, sampleSavings, sampleTransactions } from '../lib/sample';
+import { todayISO } from '../lib/dates';
+import { debtTotals } from '../lib/people';
+import { sampleDebts, sampleOpeningBalance, sampleSavings, sampleTransactions } from '../lib/sample';
 import { byCategory, inMonth, newestFirst, totalsFor } from '../lib/stats';
 import { useStore } from '../store';
 
-export function Home({ month, setMonth, openTransaction, addTransaction, showCategory, goTab, openBalance, openSaving }: ScreenProps) {
+export function Home(props: ScreenProps) {
+  const { month, setMonth, openTransaction, addTransaction, showCategory, goTab, openBalance, openSaving, setDay, setTrackerView } = props;
   const store = useStore();
   const { transactions, categories, settings } = store.data;
   const monthTx = useMemo(() => inMonth(transactions, month), [transactions, month]);
@@ -19,12 +23,20 @@ export function Home({ month, setMonth, openTransaction, addTransaction, showCat
   const { currency, monthlyBudget } = settings;
   const { now: money, saved } = store.balances;
   const started = transactions.length > 0 || settings.openingBalance !== 0;
+  // Getting started gives way once anything is recorded.
+  const hasActivity = transactions.length > 0 || store.data.debts.length > 0 || store.data.savings.length > 0;
+  const today = todayISO();
+  const spentToday = useMemo(() => totalsFor(transactions.filter((tx) => tx.date === today)), [transactions, today]);
+  const owed = useMemo(() => debtTotals(store.data.debts), [store.data.debts]);
+  const openTracker = (view: 'day' | 'month') => {
+    if (view === 'day') setDay(today);
+    setTrackerView(view);
+    goTab('tracker');
+  };
 
   return (
     <div className="screen-inner">
-      <header className="screen-header">
-        <h1>Expense Tracker</h1>
-      </header>
+      <ScreenHeader title="Expense Tracker" onSettings={() => goTab('settings')} />
 
       <section className="card wallet" aria-label="Money you have">
         <div className="wallet-head">
@@ -62,7 +74,7 @@ export function Home({ month, setMonth, openTransaction, addTransaction, showCat
         </div>
       </section>
 
-      {transactions.length === 0 ? (
+      {!hasActivity ? (
         <section className="card welcome">
           <h2>Get started</h2>
           <ol className="steps">
@@ -97,6 +109,7 @@ export function Home({ month, setMonth, openTransaction, addTransaction, showCat
                 ...store.data,
                 transactions: sampleTransactions(currency),
                 savings: sampleSavings(currency),
+                debts: sampleDebts(currency),
                 settings: { ...settings, openingBalance: sampleOpeningBalance(currency) },
               })
             }
@@ -106,6 +119,34 @@ export function Home({ month, setMonth, openTransaction, addTransaction, showCat
         </section>
       ) : (
         <>
+          <button className="card card-link today-link" onClick={() => openTracker('day')}>
+            <span>
+              Spent today <strong>{formatMoney(spentToday.expense, currency)}</strong>
+              {spentToday.count > 0 && <span className="muted"> · {spentToday.count} {spentToday.count === 1 ? 'entry' : 'entries'}</span>}
+            </span>
+            <span className="link-label">
+              Daily tracker <Icon name="right" size={18} />
+            </span>
+          </button>
+
+          {(owed.toGet > 0 || owed.toGive > 0) && (
+            <button className="card card-link" onClick={() => goTab('people')}>
+              <span className="owed-line">
+                {owed.toGet > 0 && (
+                  <span>
+                    To get back <strong className="owed-to-you">{formatMoney(owed.toGet, currency)}</strong>
+                  </span>
+                )}
+                {owed.toGive > 0 && (
+                  <span>
+                    To give <strong className="you-owe">{formatMoney(owed.toGive, currency)}</strong>
+                  </span>
+                )}
+              </span>
+              <Icon name="right" size={18} />
+            </button>
+          )}
+
           <MonthSwitcher month={month} onChange={setMonth} />
 
           <section className="card" aria-label="This month">
@@ -144,8 +185,8 @@ export function Home({ month, setMonth, openTransaction, addTransaction, showCat
             <section className="card">
               <div className="card-head">
                 <h2>Top spending</h2>
-                <button className="link-btn" onClick={() => goTab('stats')}>
-                  Stats
+                <button className="link-btn" onClick={() => openTracker('month')}>
+                  Monthly tracker
                 </button>
               </div>
               <CategoryBars rows={spending} currency={currency} limit={4} onSelect={showCategory} />

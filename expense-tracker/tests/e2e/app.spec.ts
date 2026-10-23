@@ -64,14 +64,14 @@ test('edits, deletes and undoes', async ({ page }) => {
 
 test('the back button closes a sheet, then returns home, without leaving the app', async ({ page }) => {
   await addTransaction(page, { amount: '10', category: 'Groceries' });
-  await page.getByRole('button', { name: 'Stats' }).last().click();
-  await expect(page.getByRole('heading', { name: 'Stats', level: 1 })).toBeVisible();
+  await page.getByRole('navigation').getByRole('button', { name: 'Tracker' }).click();
+  await expect(page.getByRole('heading', { name: 'Tracker', level: 1 })).toBeVisible();
   await page.getByRole('button', { name: 'Add transaction' }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
 
   await page.goBack();
   await expect(page.getByRole('dialog')).toBeHidden();
-  await expect(page.getByRole('heading', { name: 'Stats', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Tracker', level: 1 })).toBeVisible();
 
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.goBack();
@@ -86,9 +86,10 @@ test('the back button closes a sheet, then returns home, without leaving the app
 
 test('sample data fills the stats, and a category opens its transactions', async ({ page }) => {
   await page.getByRole('button', { name: 'Try it with sample data' }).click();
-  await page.getByRole('navigation').getByRole('button', { name: 'Stats' }).click();
+  await page.getByRole('navigation').getByRole('button', { name: 'Tracker' }).click();
+  await page.getByRole('radio', { name: 'Monthly' }).click();
   await expect(page.getByRole('heading', { name: 'Where it went' })).toBeVisible();
-  await expect(page.getByRole('img', { name: 'Spending in each of the last months' })).toBeVisible();
+  await expect(page.getByRole('img', { name: 'Spending in each of the last 6 months' })).toBeVisible();
   await expect(page.locator('.month-table tbody tr')).toHaveCount(6);
 
   await page.locator('.cat-bars').getByRole('button', { name: /Groceries/ }).click();
@@ -122,7 +123,7 @@ test('budgets warn as spending nears and passes the limit', async ({ page }) => 
 
 test('backs up, erases and restores', async ({ page }) => {
   await addTransaction(page, { amount: '42', category: 'Health', note: 'Vitamins' });
-  await page.getByRole('navigation').getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
 
   const download = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Back up' }).click();
@@ -133,7 +134,7 @@ test('backs up, erases and restores', async ({ page }) => {
   await page.getByRole('navigation').getByRole('button', { name: 'Home' }).click();
   await expect(page.getByRole('heading', { name: 'Get started' })).toBeVisible();
 
-  await page.getByRole('navigation').getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await page.locator('input[type=file]').setInputFiles(file);
   const dialog = page.getByRole('alertdialog');
   await expect(dialog).toContainText('It has 1 transactions');
@@ -144,7 +145,7 @@ test('backs up, erases and restores', async ({ page }) => {
 
 test('exports a CSV', async ({ page }) => {
   await addTransaction(page, { amount: '15.75', category: 'Food & dining', note: 'Chai, samosa' });
-  await page.getByRole('navigation').getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   const download = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Export CSV' }).click();
   const csv = await (await download).createReadStream();
@@ -157,7 +158,7 @@ test('exports a CSV', async ({ page }) => {
 });
 
 test('custom categories can be added, used and deleted', async ({ page }) => {
-  await page.getByRole('navigation').getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('button', { name: 'Add expense category' }).click();
   const sheet = page.getByRole('dialog');
   await sheet.getByLabel('Name').fill('Pets');
@@ -167,7 +168,7 @@ test('custom categories can be added, used and deleted', async ({ page }) => {
 
   await page.getByRole('navigation').getByRole('button', { name: 'Home' }).click();
   await addTransaction(page, { amount: '300', category: 'Pets', note: 'Dog food' });
-  await page.getByRole('navigation').getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('button', { name: /Pets/ }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Delete' }).click();
   await expect(page.getByRole('alertdialog')).toContainText('Its 1 transaction will move to Other.');
@@ -177,7 +178,7 @@ test('custom categories can be added, used and deleted', async ({ page }) => {
 });
 
 test('switches theme', async ({ page }) => {
-  await page.getByRole('navigation').getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('radio', { name: 'Dark' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   const background = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
@@ -290,4 +291,107 @@ test('skipped cravings go into savings', async ({ page }) => {
   // On the Savings tab, the + button logs a craving.
   await page.getByRole('button', { name: 'Skip a craving' }).last().click();
   await expect(page.getByRole('dialog', { name: 'Skip a craving' })).toBeVisible();
+});
+
+test('notes who has to give money back and who you have to pay', async ({ page }) => {
+  const wallet = page.getByRole('region', { name: 'Money you have' });
+  await wallet.getByRole('button', { name: 'Set amount' }).click();
+  await page.getByLabel('Amount you have').fill('1000');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+
+  await page.getByRole('navigation').getByRole('button', { name: 'People' }).click();
+  await expect(page.getByText('Nothing to settle.')).toBeVisible();
+
+  // Lent Rahul 500 from my money.
+  await page.getByRole('button', { name: 'They owe me' }).click();
+  let sheet = page.getByRole('dialog', { name: 'Money to get back' });
+  await sheet.getByLabel('Who has to give you money?').fill('Rahul');
+  await sheet.getByLabel('How much').fill('500');
+  await sheet.getByLabel('What for?').fill('Concert ticket');
+  await sheet.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByRole('status')).toContainText('Noted: Rahul has to give you ₹500');
+
+  // Priya paid for my lunch: I owe her, but no money came to me.
+  await page.getByRole('button', { name: 'I owe them' }).click();
+  sheet = page.getByRole('dialog', { name: 'Money to give' });
+  await sheet.getByLabel('Who do you have to give money to?').fill('Priya');
+  await sheet.getByLabel('How much').fill('300');
+  await sheet.getByRole('checkbox', { name: /I got this money in hand/ }).uncheck();
+  await sheet.getByRole('button', { name: 'Save' }).click();
+
+  const owed = page.getByRole('region', { name: 'Money owed' });
+  await expect(owed).toContainText('To get back₹500');
+  await expect(owed).toContainText('To give₹300');
+
+  // Rahul pays 200 back; the sheet returns to his page.
+  await page.getByRole('button', { name: /Rahul/ }).click();
+  await page.getByRole('button', { name: 'Got money back' }).click();
+  const payment = page.getByRole('dialog', { name: 'Money back from Rahul' });
+  await expect(payment.getByLabel('Amount paid back')).toHaveValue('500');
+  await payment.getByLabel('Amount paid back').fill('600');
+  await payment.getByRole('button', { name: 'Save' }).click();
+  await expect(payment.getByRole('alert')).toContainText('Only ₹500 is left on this.');
+  await payment.getByLabel('Amount paid back').fill('200');
+  await payment.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByRole('status')).toContainText('Got ₹200 back from Rahul. ₹300 still to get back.');
+  const rahul = page.getByRole('dialog', { name: 'Rahul' });
+  await expect(rahul).toContainText('₹300 left');
+  await rahul.getByRole('button', { name: 'Close' }).click();
+
+  // Money you have: 1000 − 500 lent + 200 back. Priya's debt moved no money.
+  await page.getByRole('navigation').getByRole('button', { name: 'Home' }).click();
+  await expect(wallet).toContainText('₹700');
+  await expect(page.getByRole('button', { name: /To get back ₹300\s*To give ₹300/ })).toBeVisible();
+
+  // The rest comes back, and Rahul is settled.
+  await page.getByRole('navigation').getByRole('button', { name: 'People' }).click();
+  await page.getByRole('button', { name: /Rahul/ }).click();
+  await page.getByRole('button', { name: 'Got money back' }).click();
+  await page.getByRole('dialog', { name: 'Money back from Rahul' }).getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByRole('status')).toContainText('Rahul has paid you back in full.');
+  await expect(page.getByRole('dialog', { name: 'Rahul' })).toContainText('All settled.');
+  await page.getByRole('dialog', { name: 'Rahul' }).getByRole('button', { name: 'Close' }).click();
+  await expect(page.getByText('Settled (1)')).toBeVisible();
+  await expect(owed).toContainText('To get back₹0');
+
+  await page.reload();
+  await page.getByRole('navigation').getByRole('button', { name: 'Home' }).click();
+  await expect(page.getByRole('region', { name: 'Money you have' })).toContainText('₹1,000');
+});
+
+test('tracks each day and each month', async ({ page }) => {
+  await addTransaction(page, { amount: '120', category: 'Food & dining', note: 'Breakfast' });
+  // One for yesterday.
+  await page.getByRole('button', { name: 'Add transaction' }).click();
+  await page.getByLabel('Amount').fill('80');
+  await page.getByRole('dialog').getByRole('button', { name: 'Transport', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Yesterday' }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+
+  await page.getByRole('button', { name: /Spent today ₹120 · 1 entry/ }).click();
+  await expect(page.getByRole('heading', { name: 'Tracker', level: 1 })).toBeVisible();
+  const day = page.getByRole('region', { name: 'This day' });
+  await expect(day).toContainText('Spent today');
+  await expect(day).toContainText('₹120');
+  await expect(page.getByRole('button', { name: /Breakfast Food & dining −₹120/ })).toBeVisible();
+  await expect(page.getByRole('img', { name: 'Spending on each of the last 7 days' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Previous day' }).click();
+  await expect(day).toContainText('Spent yesterday');
+  await expect(day).toContainText('₹80');
+
+  await page.getByRole('radio', { name: 'Monthly' }).click();
+  await expect(page.getByRole('heading', { name: 'Day by day' })).toBeVisible();
+  const todayCell = page.getByRole('button', { name: 'Today: spent ₹120' });
+  await expect(todayCell).toBeVisible();
+  await todayCell.click();
+  await expect(page.getByRole('radio', { name: 'Daily' })).toHaveAttribute('aria-checked', 'true');
+  await expect(day).toContainText('Spent today');
+
+  // A monthly budget gives each day a share of it.
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByLabel('Monthly budget').fill('3100');
+  await page.getByLabel('Monthly budget').press('Enter');
+  await page.getByRole('navigation').getByRole('button', { name: 'Tracker' }).click();
+  await expect(page.getByRole('meter', { name: 'Daily limit' })).toBeVisible();
 });

@@ -1,4 +1,4 @@
-import type { AppData, Category, Saving, Settings, ThemePref, Transaction, TxType } from '../types';
+import type { AppData, Category, Debt, DebtPayment, Saving, Settings, ThemePref, Transaction, TxType } from '../types';
 import { isValidISODate } from './dates';
 import { createInitialData, DEFAULT_CATEGORIES, otherCategoryId } from './defaults';
 import { isSupportedCurrency } from './money';
@@ -71,6 +71,45 @@ function sanitizeSavings(raw: unknown): Saving[] {
   return savings;
 }
 
+const createdAtOf = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+
+function sanitizePayments(raw: unknown): DebtPayment[] {
+  const seen = new Set<string>();
+  const payments: DebtPayment[] = [];
+  for (const item of Array.isArray(raw) ? raw : []) {
+    if (!isObject(item) || typeof item.id !== 'string' || !item.id || seen.has(item.id) || !isAmount(item.amount)) continue;
+    if (typeof item.date !== 'string' || !isValidISODate(item.date)) continue;
+    seen.add(item.id);
+    payments.push({ id: item.id, amount: item.amount, date: item.date, cash: item.cash === true, createdAt: createdAtOf(item.createdAt) });
+  }
+  return payments;
+}
+
+function sanitizeDebts(raw: unknown): Debt[] {
+  const seen = new Set<string>();
+  const debts: Debt[] = [];
+  for (const item of Array.isArray(raw) ? raw : []) {
+    if (!isObject(item) || typeof item.id !== 'string' || !item.id || seen.has(item.id) || !isAmount(item.amount)) continue;
+    if (item.kind !== 'lent' && item.kind !== 'borrowed') continue;
+    if (typeof item.date !== 'string' || !isValidISODate(item.date)) continue;
+    const person = text(item.person, 40);
+    if (!person) continue;
+    seen.add(item.id);
+    debts.push({
+      id: item.id,
+      person,
+      kind: item.kind,
+      amount: item.amount,
+      date: item.date,
+      note: text(item.note, 200),
+      cash: item.cash === true,
+      payments: sanitizePayments(item.payments),
+      createdAt: createdAtOf(item.createdAt),
+    });
+  }
+  return debts;
+}
+
 function sanitizeSettings(raw: unknown, fallback: Settings): Settings {
   const settings = isObject(raw) ? raw : {};
   const themes: ThemePref[] = ['system', 'light', 'dark'];
@@ -100,6 +139,7 @@ export function sanitize(raw: unknown): AppData {
     categories,
     categoryBudgets,
     savings: sanitizeSavings(raw.savings),
+    debts: sanitizeDebts(raw.debts),
     settings: sanitizeSettings(raw.settings, initial.settings),
   };
 }

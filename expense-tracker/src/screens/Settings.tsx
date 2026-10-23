@@ -3,6 +3,7 @@ import type { ScreenProps } from '../App';
 import type { ThemePref, TxType } from '../types';
 import { useFeedback } from '../components/Feedback';
 import { Icon } from '../components/Icon';
+import { ScreenHeader } from '../components/ScreenHeader';
 import { toCSV } from '../lib/csv';
 import { todayISO } from '../lib/dates';
 import { createInitialData } from '../lib/defaults';
@@ -43,7 +44,7 @@ function LimitInput({ value, onSave, label }: { value: number | null; onSave: (l
   );
 }
 
-export function Settings({ openCategory, openBalance }: ScreenProps) {
+export function Settings({ openCategory, openBalance, goTab }: ScreenProps) {
   const store = useStore();
   const { notify, confirm } = useFeedback();
   const { transactions, categories, categoryBudgets, settings } = store.data;
@@ -52,7 +53,8 @@ export function Settings({ openCategory, openBalance }: ScreenProps) {
   useEffect(() => onInstallChange(() => setInstallable(canPromptInstall())), []);
   const samples =
     transactions.filter((tx) => tx.id.startsWith(SAMPLE_PREFIX)).length +
-    store.data.savings.filter((s) => s.id.startsWith(SAMPLE_PREFIX)).length;
+    store.data.savings.filter((s) => s.id.startsWith(SAMPLE_PREFIX)).length +
+    store.data.debts.filter((d) => d.id.startsWith(SAMPLE_PREFIX)).length;
   const expenseCategories = categories.filter((c) => c.type === 'expense');
 
   const run = async (task: () => Promise<void>) => {
@@ -64,7 +66,7 @@ export function Settings({ openCategory, openBalance }: ScreenProps) {
   };
 
   const exportCSV = () =>
-    run(() => saveTextFile(`expenses-${todayISO()}.csv`, toCSV(transactions, categories, settings.currency, settings.openingBalance), 'text/csv'));
+    run(() => saveTextFile(`expenses-${todayISO()}.csv`, toCSV(transactions, categories, settings.currency, settings.openingBalance, store.data.debts), 'text/csv'));
 
   const backup = () =>
     run(() => saveTextFile(`expense-tracker-backup-${todayISO()}.json`, serializeBackup(store.data), 'application/json'));
@@ -101,6 +103,7 @@ export function Settings({ openCategory, openBalance }: ScreenProps) {
       ...store.data,
       transactions: transactions.filter((tx) => !tx.id.startsWith(SAMPLE_PREFIX)),
       savings: store.data.savings.filter((s) => !s.id.startsWith(SAMPLE_PREFIX)),
+      debts: store.data.debts.filter((d) => !d.id.startsWith(SAMPLE_PREFIX)),
       settings: { ...settings, openingBalance: 0 },
     });
     notify('Sample data removed');
@@ -109,7 +112,7 @@ export function Settings({ openCategory, openBalance }: ScreenProps) {
   const eraseAll = async () => {
     const ok = await confirm({
       title: 'Erase everything?',
-      message: `Deletes all ${transactions.length} transactions, your savings, categories, budgets and the money you have from this device. Make a backup first if you might want them back.`,
+      message: `Deletes all ${transactions.length} transactions, your savings, what people owe and are owed, categories, budgets and the money you have from this device. Make a backup first if you might want them back.`,
       confirmLabel: 'Erase',
       danger: true,
     });
@@ -146,9 +149,14 @@ export function Settings({ openCategory, openBalance }: ScreenProps) {
 
   return (
     <div className="screen-inner">
-      <header className="screen-header">
-        <h1>Settings</h1>
-      </header>
+      <ScreenHeader
+        title="Settings"
+        action={
+          <button className="link-btn" onClick={() => goTab('home')}>
+            Done
+          </button>
+        }
+      />
 
       {isDemo && (
         <section className="card install">
@@ -288,6 +296,7 @@ export function Settings({ openCategory, openBalance }: ScreenProps) {
         <button className="btn btn-ghost btn-danger-text btn-block" onClick={eraseAll} disabled={
             transactions.length === 0 &&
             store.data.savings.length === 0 &&
+            store.data.debts.length === 0 &&
             settings.openingBalance === 0 &&
             Object.keys(categoryBudgets).length === 0
           }>

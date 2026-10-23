@@ -1,11 +1,13 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react';
-import type { AppData, Category, Saving, Settings, Transaction } from './types';
+import type { AppData, Category, Debt, DebtPayment, Saving, Settings, Transaction } from './types';
 import { newId, otherCategoryId } from './lib/defaults';
 import { balanceNow, runningBalances } from './lib/stats';
 import { loadData, saveData, STORAGE_KEY } from './lib/storage';
 
 export type TransactionInput = Omit<Transaction, 'id' | 'createdAt'>;
 export type SavingInput = Omit<Saving, 'id' | 'createdAt'>;
+export type DebtInput = Omit<Debt, 'id' | 'createdAt' | 'payments'>;
+export type PaymentInput = Omit<DebtPayment, 'id' | 'createdAt'>;
 
 type Action =
   | { type: 'addTransaction'; tx: Transaction }
@@ -19,6 +21,11 @@ type Action =
   | { type: 'addSaving'; saving: Saving }
   | { type: 'updateSaving'; id: string; input: SavingInput }
   | { type: 'deleteSaving'; id: string }
+  | { type: 'addDebt'; debt: Debt }
+  | { type: 'updateDebt'; id: string; input: DebtInput }
+  | { type: 'deleteDebt'; id: string }
+  | { type: 'addPayment'; debtId: string; payment: DebtPayment }
+  | { type: 'deletePayment'; debtId: string; paymentId: string }
   | { type: 'replaceAll'; data: AppData };
 
 function reducer(state: AppData, action: Action): AppData {
@@ -68,6 +75,29 @@ function reducer(state: AppData, action: Action): AppData {
       return { ...state, savings: state.savings.map((s) => (s.id === action.id ? { ...s, ...action.input } : s)) };
     case 'deleteSaving':
       return { ...state, savings: state.savings.filter((s) => s.id !== action.id) };
+    case 'addDebt':
+      if (state.debts.some((d) => d.id === action.debt.id)) return state;
+      return { ...state, debts: [...state.debts, action.debt] };
+    case 'updateDebt':
+      return { ...state, debts: state.debts.map((d) => (d.id === action.id ? { ...d, ...action.input } : d)) };
+    case 'deleteDebt':
+      return { ...state, debts: state.debts.filter((d) => d.id !== action.id) };
+    case 'addPayment':
+      return {
+        ...state,
+        debts: state.debts.map((d) =>
+          d.id === action.debtId && !d.payments.some((p) => p.id === action.payment.id)
+            ? { ...d, payments: [...d.payments, action.payment] }
+            : d,
+        ),
+      };
+    case 'deletePayment':
+      return {
+        ...state,
+        debts: state.debts.map((d) =>
+          d.id === action.debtId ? { ...d, payments: d.payments.filter((p) => p.id !== action.paymentId) } : d,
+        ),
+      };
     case 'replaceAll':
       return action.data;
   }
@@ -101,6 +131,12 @@ export interface Store {
   updateSaving(id: string, input: SavingInput): void;
   deleteSaving(id: string): Saving | undefined;
   restoreSaving(saving: Saving): void;
+  addDebt(input: DebtInput): Debt;
+  updateDebt(id: string, input: DebtInput): void;
+  deleteDebt(id: string): Debt | undefined;
+  restoreDebt(debt: Debt): void;
+  addPayment(debtId: string, input: PaymentInput): DebtPayment;
+  deletePayment(debtId: string, paymentId: string): void;
   replaceAll(data: AppData): void;
 }
 
@@ -132,15 +168,15 @@ export function StoreProvider({ children, storage }: { children: ReactNode; stor
     return () => window.removeEventListener('storage', onStorage);
   }, [storage]);
 
-  const { transactions, savings } = data;
+  const { transactions, savings, debts } = data;
   const { openingBalance } = data.settings;
   const balances = useMemo<Balances>(
     () => ({
-      now: balanceNow(transactions, openingBalance),
+      now: balanceNow(transactions, openingBalance, { debts }),
       saved: savings.reduce((sum, s) => sum + s.amount, 0),
-      after: runningBalances(transactions, openingBalance),
+      after: runningBalances(transactions, openingBalance, debts),
     }),
-    [transactions, savings, openingBalance],
+    [transactions, savings, debts, openingBalance],
   );
 
   const store = useMemo<Store>(
@@ -178,6 +214,24 @@ export function StoreProvider({ children, storage }: { children: ReactNode; stor
         return saving;
       },
       restoreSaving: (saving) => dispatch({ type: 'addSaving', saving }),
+      addDebt(input) {
+        const debt: Debt = { ...input, id: newId(), createdAt: Date.now(), payments: [] };
+        dispatch({ type: 'addDebt', debt });
+        return debt;
+      },
+      updateDebt: (id, input) => dispatch({ type: 'updateDebt', id, input }),
+      deleteDebt(id) {
+        const debt = latest.current.debts.find((d) => d.id === id);
+        dispatch({ type: 'deleteDebt', id });
+        return debt;
+      },
+      restoreDebt: (debt) => dispatch({ type: 'addDebt', debt }),
+      addPayment(debtId, input) {
+        const payment: DebtPayment = { ...input, id: newId(), createdAt: Date.now() };
+        dispatch({ type: 'addPayment', debtId, payment });
+        return payment;
+      },
+      deletePayment: (debtId, paymentId) => dispatch({ type: 'deletePayment', debtId, paymentId }),
       replaceAll: (next) => dispatch({ type: 'replaceAll', data: next }),
     }),
     [data, balances, openingBalance, saved],

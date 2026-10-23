@@ -1,4 +1,4 @@
-import type { Category, Transaction } from '../types';
+import type { Category, Debt, Transaction } from '../types';
 import { SCALE } from './money';
 import { newestFirst, runningBalances } from './stats';
 
@@ -14,9 +14,15 @@ const number = (amount: number) => (amount / SCALE).toFixed(2);
  * A spreadsheet-ready export, newest first, with the money left after each entry.
  * Starts with a BOM so Excel reads it as UTF-8.
  */
-export function toCSV(transactions: Transaction[], categories: Category[], currency: string, openingBalance = 0): string {
+export function toCSV(
+  transactions: Transaction[],
+  categories: Category[],
+  currency: string,
+  openingBalance = 0,
+  debts: Debt[] = [],
+): string {
   const names = new Map(categories.map((c) => [c.id, c.name]));
-  const left = runningBalances(transactions, openingBalance);
+  const left = runningBalances(transactions, openingBalance, debts);
   const rows = ['Date,Type,Category,Amount,Currency,Note,Balance after'];
   for (const tx of [...transactions].sort(newestFirst)) {
     rows.push(

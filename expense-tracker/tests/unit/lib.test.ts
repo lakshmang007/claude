@@ -202,8 +202,8 @@ describe('stats', () => {
 
   it('keeps a running balance from the opening amount', () => {
     // Entries: 09-30 food 700; 10-01 salary 50000 and food 3000; 10-03 transport 1000 and food 2000.
-    expect(balanceNow(list, 10000, new Date(2026, 9, 3, 12))).toBe(10000 + 50000 - 6700);
-    expect(balanceNow(list, 0, new Date(2026, 9, 2))).toBe(50000 - 3000 - 700);
+    expect(balanceNow(list, 10000, { now: new Date(2026, 9, 3, 12) })).toBe(10000 + 50000 - 6700);
+    expect(balanceNow(list, 0, { now: new Date(2026, 9, 2) })).toBe(50000 - 3000 - 700);
     const after = runningBalances(list, 1000);
     expect(after.get(list[4].id)).toBe(300);
     let balance = 1000;

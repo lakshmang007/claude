@@ -2,12 +2,13 @@ import { useMemo } from 'react';
 import type { ScreenProps } from '../App';
 import { useFeedback } from '../components/Feedback';
 import { Icon } from '../components/Icon';
+import { ScreenHeader } from '../components/ScreenHeader';
 import { currentMonth, dayLabel, monthOf, todayISO } from '../lib/dates';
 import { formatMoney } from '../lib/money';
 import { frequentCravings, sortSavings } from '../lib/stats';
 import { useStore } from '../store';
 
-export function Savings({ openSaving }: ScreenProps) {
+export function Savings({ openSaving, goTab }: ScreenProps) {
   const store = useStore();
   const { notify } = useFeedback();
   const { savings, settings } = store.data;
@@ -27,9 +28,7 @@ export function Savings({ openSaving }: ScreenProps) {
 
   return (
     <div className="screen-inner">
-      <header className="screen-header">
-        <h1>Savings</h1>
-      </header>
+      <ScreenHeader title="Savings" onSettings={() => goTab('settings')} />
 
       <section className="card jar" aria-label="Savings jar">
         <span className="balance-label">Saved by skipping cravings</span>
