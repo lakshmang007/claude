@@ -1,9 +1,11 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react';
-import type { AppData, Category, Settings, Transaction } from './types';
+import type { AppData, Category, Saving, Settings, Transaction } from './types';
 import { newId, otherCategoryId } from './lib/defaults';
+import { balanceNow, runningBalances } from './lib/stats';
 import { loadData, saveData, STORAGE_KEY } from './lib/storage';
 
 export type TransactionInput = Omit<Transaction, 'id' | 'createdAt'>;
+export type SavingInput = Omit<Saving, 'id' | 'createdAt'>;
 
 type Action =
   | { type: 'addTransaction'; tx: Transaction }
@@ -14,6 +16,9 @@ type Action =
   | { type: 'deleteCategory'; id: string }
   | { type: 'setCategoryBudget'; id: string; limit: number | null }
   | { type: 'updateSettings'; patch: Partial<Settings> }
+  | { type: 'addSaving'; saving: Saving }
+  | { type: 'updateSaving'; id: string; input: SavingInput }
+  | { type: 'deleteSaving'; id: string }
   | { type: 'replaceAll'; data: AppData };
 
 function reducer(state: AppData, action: Action): AppData {
@@ -56,13 +61,30 @@ function reducer(state: AppData, action: Action): AppData {
     }
     case 'updateSettings':
       return { ...state, settings: { ...state.settings, ...action.patch } };
+    case 'addSaving':
+      if (state.savings.some((s) => s.id === action.saving.id)) return state;
+      return { ...state, savings: [...state.savings, action.saving] };
+    case 'updateSaving':
+      return { ...state, savings: state.savings.map((s) => (s.id === action.id ? { ...s, ...action.input } : s)) };
+    case 'deleteSaving':
+      return { ...state, savings: state.savings.filter((s) => s.id !== action.id) };
     case 'replaceAll':
       return action.data;
   }
 }
 
+export interface Balances {
+  /** Money on hand today. */
+  now: number;
+  /** Of that, what skipped cravings have put in the savings jar. */
+  saved: number;
+  /** Money left after each entry, by transaction id. */
+  after: Map<string, number>;
+}
+
 export interface Store {
   data: AppData;
+  balances: Balances;
   /** False once the browser has refused to save (storage full or blocked). */
   saved: boolean;
   addTransaction(input: TransactionInput): Transaction;
@@ -73,6 +95,12 @@ export interface Store {
   deleteCategory(id: string): void;
   setCategoryBudget(id: string, limit: number | null): void;
   updateSettings(patch: Partial<Settings>): void;
+  /** Makes "money you have" read `amount` today, by moving the opening balance. */
+  setBalanceNow(amount: number): void;
+  addSaving(input: SavingInput): Saving;
+  updateSaving(id: string, input: SavingInput): void;
+  deleteSaving(id: string): Saving | undefined;
+  restoreSaving(saving: Saving): void;
   replaceAll(data: AppData): void;
 }
 
@@ -104,9 +132,21 @@ export function StoreProvider({ children, storage }: { children: ReactNode; stor
     return () => window.removeEventListener('storage', onStorage);
   }, [storage]);
 
+  const { transactions, savings } = data;
+  const { openingBalance } = data.settings;
+  const balances = useMemo<Balances>(
+    () => ({
+      now: balanceNow(transactions, openingBalance),
+      saved: savings.reduce((sum, s) => sum + s.amount, 0),
+      after: runningBalances(transactions, openingBalance),
+    }),
+    [transactions, savings, openingBalance],
+  );
+
   const store = useMemo<Store>(
     () => ({
       data,
+      balances,
       saved,
       addTransaction(input) {
         const tx: Transaction = { ...input, id: newId(), createdAt: Date.now() };
@@ -124,9 +164,23 @@ export function StoreProvider({ children, storage }: { children: ReactNode; stor
       deleteCategory: (id) => dispatch({ type: 'deleteCategory', id }),
       setCategoryBudget: (id, limit) => dispatch({ type: 'setCategoryBudget', id, limit }),
       updateSettings: (patch) => dispatch({ type: 'updateSettings', patch }),
+      setBalanceNow: (amount) =>
+        dispatch({ type: 'updateSettings', patch: { openingBalance: openingBalance + amount - balances.now } }),
+      addSaving(input) {
+        const saving: Saving = { ...input, id: newId(), createdAt: Date.now() };
+        dispatch({ type: 'addSaving', saving });
+        return saving;
+      },
+      updateSaving: (id, input) => dispatch({ type: 'updateSaving', id, input }),
+      deleteSaving(id) {
+        const saving = latest.current.savings.find((s) => s.id === id);
+        dispatch({ type: 'deleteSaving', id });
+        return saving;
+      },
+      restoreSaving: (saving) => dispatch({ type: 'addSaving', saving }),
       replaceAll: (next) => dispatch({ type: 'replaceAll', data: next }),
     }),
-    [data, saved],
+    [data, balances, openingBalance, saved],
   );
 
   return <StoreContext.Provider value={store}>{children}</StoreContext.Provider>;

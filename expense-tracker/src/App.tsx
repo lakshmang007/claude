@@ -2,7 +2,9 @@ import { useCallback, useEffect, useState } from 'react';
 import { SystemBars, SystemBarsStyle } from '@capacitor/core';
 import { App as NativeApp } from '@capacitor/app';
 import type { TxType } from './types';
+import { BalanceSheet } from './components/BalanceSheet';
 import { CategorySheet } from './components/CategorySheet';
+import { SavingSheet } from './components/SavingSheet';
 import { useFeedback } from './components/Feedback';
 import { Icon, type IconName } from './components/Icon';
 import { TransactionSheet } from './components/TransactionSheet';
@@ -10,6 +12,7 @@ import { currentMonth, todayISO } from './lib/dates';
 import { isNative } from './lib/install';
 import { useNav, type Tab } from './nav';
 import { Home } from './screens/Home';
+import { Savings } from './screens/Savings';
 import { Settings } from './screens/Settings';
 import { Stats } from './screens/Stats';
 import { Transactions } from './screens/Transactions';
@@ -30,6 +33,10 @@ export interface ScreenProps {
   /** Shows the month's transactions in one category. */
   showCategory: (categoryId: string) => void;
   openCategory: (id: string | undefined, type: TxType) => void;
+  /** Opens the sheet for setting how much money the person has now. */
+  openBalance: () => void;
+  /** Opens a skipped craving, or a new one without an id. */
+  openSaving: (id?: string) => void;
   goTab: (tab: Tab) => void;
   filter: ListFilter;
   setFilter: (filter: ListFilter) => void;
@@ -38,6 +45,7 @@ export interface ScreenProps {
 const TABS: { tab: Tab; label: string; icon: IconName }[] = [
   { tab: 'home', label: 'Home', icon: 'home' },
   { tab: 'transactions', label: 'History', icon: 'list' },
+  { tab: 'savings', label: 'Savings', icon: 'jar' },
   { tab: 'stats', label: 'Stats', icon: 'chart' },
   { tab: 'settings', label: 'Settings', icon: 'settings' },
 ];
@@ -94,12 +102,14 @@ export function App() {
       goTab('transactions');
     },
     openCategory: (id, type) => open({ kind: 'category', id, type }),
+    openBalance: () => open({ kind: 'balance' }),
+    openSaving: (id) => open({ kind: 'saving', id }),
     goTab,
     filter,
     setFilter,
   };
 
-  const showFab = tab !== 'settings' && store.data.transactions.length > 0;
+  const showFab = tab !== 'settings';
   // New entries made while looking at another month land in that month.
   const defaultDate = month === currentMonth() ? todayISO() : `${month}-01`;
 
@@ -108,12 +118,17 @@ export function App() {
       <main className="screen">
         {tab === 'home' && <Home {...props} />}
         {tab === 'transactions' && <Transactions {...props} />}
+        {tab === 'savings' && <Savings {...props} />}
         {tab === 'stats' && <Stats {...props} />}
         {tab === 'settings' && <Settings {...props} />}
       </main>
 
       {showFab && (
-        <button className="fab" onClick={() => addTransaction()} aria-label="Add transaction">
+        <button
+          className="fab"
+          onClick={() => (tab === 'savings' ? open({ kind: 'saving' }) : addTransaction())}
+          aria-label={tab === 'savings' ? 'Skip a craving' : 'Add transaction'}
+        >
           <Icon name="plus" size={28} />
         </button>
       )}
@@ -142,6 +157,8 @@ export function App() {
         />
       )}
       {overlay?.kind === 'category' && <CategorySheet key={overlay.id ?? 'new'} id={overlay.id} type={overlay.type} onClose={close} />}
+      {overlay?.kind === 'balance' && <BalanceSheet onClose={close} />}
+      {overlay?.kind === 'saving' && <SavingSheet key={overlay.id ?? 'new'} id={overlay.id} onClose={close} />}
     </div>
   );
 }

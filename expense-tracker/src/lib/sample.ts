@@ -1,4 +1,4 @@
-import type { Transaction } from '../types';
+import type { Saving, Transaction } from '../types';
 import { todayISO } from './dates';
 import { SCALE } from './money';
 
@@ -24,11 +24,20 @@ const EXPENSES: [category: string, note: string, rupees: number, everyDays: numb
   ['exp-health', 'Pharmacy', 240, 18],
 ];
 
+/** A sample amount written in rupees, in hundredths of `currency`: whole units where they are small, cents where they are large. */
+function sampleAmount(rupees: number, currency: string): number {
+  const rate = PER_RUPEE[currency] ?? 1 / 85;
+  return Math.max(1, rate >= 0.5 ? Math.round(rupees * rate) * SCALE : Math.round(rupees * rate * SCALE));
+}
+
+/** The money on hand the sample starts from. */
+export function sampleOpeningBalance(currency: string): number {
+  return sampleAmount(5000, currency);
+}
+
 /** About three months of believable entries ending today, for trying the app out. */
 export function sampleTransactions(currency: string, now = new Date()): Transaction[] {
-  const rate = PER_RUPEE[currency] ?? 1 / 85;
-  // Whole units where the currency's units are small, cents where they are large.
-  const money = (rupees: number) => Math.max(1, rate >= 0.5 ? Math.round(rupees * rate) * SCALE : Math.round(rupees * rate * SCALE));
+  const money = (rupees: number) => sampleAmount(rupees, currency);
   let seed = 7;
   const random = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646;
   const today = todayISO(now);
@@ -53,4 +62,21 @@ export function sampleTransactions(currency: string, now = new Date()): Transact
     }
   }
   return list;
+}
+
+const CRAVINGS: [item: string, rupees: number, daysAgo: number][] = [
+  ['Chocolate cake', 30, 0],
+  ['Cold coffee', 90, 1],
+  ['Chips', 20, 3],
+  ['Chocolate cake', 30, 5],
+  ['Pizza slice', 120, 8],
+  ['Chocolate cake', 30, 12],
+];
+
+/** A few skipped cravings over the last two weeks. */
+export function sampleSavings(currency: string, now = new Date()): Saving[] {
+  return CRAVINGS.map(([item, rupees, daysAgo], i) => {
+    const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo);
+    return { id: `${SAMPLE_PREFIX}saving-${i + 1}`, item, amount: sampleAmount(rupees, currency), date: todayISO(date), createdAt: date.getTime() + i };
+  });
 }

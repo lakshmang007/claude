@@ -20,6 +20,20 @@ export interface Transaction {
   createdAt: number;
 }
 
+/**
+ * A craving the person skipped: what it was and what it would have cost. That money stays
+ * with them, and the app counts it as saved.
+ */
+export interface Saving {
+  id: string;
+  item: string;
+  /** Integer hundredths, always positive. */
+  amount: number;
+  /** Local calendar date, YYYY-MM-DD. */
+  date: string;
+  createdAt: number;
+}
+
 export type ThemePref = 'system' | 'light' | 'dark';
 
 export interface Settings {
@@ -28,6 +42,11 @@ export interface Settings {
   theme: ThemePref;
   /** Spending limit per month, in hundredths, or null for none. */
   monthlyBudget: number | null;
+  /**
+   * Money on hand before the first entry, in hundredths. "Money you have" is this plus all
+   * income minus all expenses; correcting that figure adjusts this. Can be negative.
+   */
+  openingBalance: number;
 }
 
 export interface AppData {
@@ -36,5 +55,7 @@ export interface AppData {
   categories: Category[];
   /** Expense category id → monthly limit in hundredths. */
   categoryBudgets: Record<string, number>;
+  /** Skipped cravings, the savings jar. */
+  savings: Saving[];
   settings: Settings;
 }

@@ -2,11 +2,23 @@ import { describe, expect, it } from 'vitest';
 import type { Transaction } from '../../src/types';
 import { niceScale } from '../../src/components/Charts';
 import { toCSV } from '../../src/lib/csv';
-import { dailyAverage, budgetLevel, byCategory, filterTransactions, groupByDay, monthlySeries, totalsFor } from '../../src/lib/stats';
+import {
+  balanceNow,
+  budgetLevel,
+  byCategory,
+  dailyAverage,
+  filterTransactions,
+  frequentCravings,
+  groupByDay,
+  monthlySeries,
+  newestFirst,
+  runningBalances,
+  totalsFor,
+} from '../../src/lib/stats';
 import { dayLabel, daysInMonth, isValidISODate, shiftMonth } from '../../src/lib/dates';
 import { createInitialData, DEFAULT_CATEGORIES, OTHER_EXPENSE } from '../../src/lib/defaults';
 import { amountToInput, formatMoney, guessCurrency, parseAmount } from '../../src/lib/money';
-import { sampleTransactions } from '../../src/lib/sample';
+import { sampleOpeningBalance, sampleSavings, sampleTransactions } from '../../src/lib/sample';
 import { loadData, parseBackup, sanitize, saveData, serializeBackup, STORAGE_KEY } from '../../src/lib/storage';
 
 const tx = (over: Partial<Transaction>): Transaction => ({
@@ -62,6 +74,13 @@ describe('parseAmount', () => {
 
   it.each(['', '0', '0.00', '-5', 'abc', '1.234', '1e5', '.', '1234567890123'])('rejects %j', (input) => {
     expect(parseAmount(input)).toBeNull();
+  });
+
+  it('accepts zero only when asked', () => {
+    expect(parseAmount('0', { allowZero: true })).toBe(0);
+    expect(parseAmount('0.00', { allowZero: true })).toBe(0);
+    expect(parseAmount('', { allowZero: true })).toBeNull();
+    expect(parseAmount('-1', { allowZero: true })).toBeNull();
   });
 
   it('round-trips through the edit field', () => {
@@ -181,6 +200,35 @@ describe('stats', () => {
     expect(dailyAverage(30000, '2026-11', now)).toBe(0);
   });
 
+  it('keeps a running balance from the opening amount', () => {
+    // Entries: 09-30 food 700; 10-01 salary 50000 and food 3000; 10-03 transport 1000 and food 2000.
+    expect(balanceNow(list, 10000, new Date(2026, 9, 3, 12))).toBe(10000 + 50000 - 6700);
+    expect(balanceNow(list, 0, new Date(2026, 9, 2))).toBe(50000 - 3000 - 700);
+    const after = runningBalances(list, 1000);
+    expect(after.get(list[4].id)).toBe(300);
+    let balance = 1000;
+    for (const entry of [...list].sort((a, b) => newestFirst(b, a))) {
+      balance += entry.type === 'income' ? entry.amount : -entry.amount;
+      expect(after.get(entry.id)).toBe(balance);
+    }
+    expect(balance).toBe(1000 + 50000 - 6700);
+  });
+
+  it('lists cravings skipped most often first', () => {
+    const saving = (item: string, amount: number, createdAt: number) => ({ id: `${item}-${createdAt}`, item, amount, date: '2026-10-01', createdAt });
+    const picks = frequentCravings([
+      saving('Chips', 2000, 1),
+      saving('Chocolate cake', 3000, 2),
+      saving('chocolate cake', 3500, 3),
+      saving('Coffee', 9000, 4),
+    ]);
+    expect(picks).toEqual([
+      { item: 'chocolate cake', amount: 3500, count: 2 },
+      { item: 'Coffee', amount: 9000, count: 1 },
+      { item: 'Chips', amount: 2000, count: 1 },
+    ]);
+  });
+
   it('grades budgets', () => {
     expect(budgetLevel(79, 100)).toBe('ok');
     expect(budgetLevel(80, 100)).toBe('near');
@@ -248,7 +296,14 @@ describe('storage', () => {
         { id: 'junk' },
       ],
       categoryBudgets: { 'exp-food': 5000, 'inc-salary': 100, nope: 1 },
-      settings: { currency: 'NOPE', theme: 'purple', monthlyBudget: 0 },
+      savings: [
+        { id: 's1', item: ' Cake ', amount: 3000, date: '2026-10-01', createdAt: 1 },
+        { id: 's1', item: 'Dup', amount: 3000, date: '2026-10-01' },
+        { id: 's2', item: '', amount: 500, date: '2026-10-02' },
+        { id: 's3', item: 'Free', amount: 0, date: '2026-10-02' },
+        { id: 's4', item: 'Bad date', amount: 100, date: 'yesterday' },
+      ],
+      settings: { currency: 'NOPE', theme: 'purple', monthlyBudget: 0, openingBalance: 1.5 },
     });
     expect(data.transactions.map((t) => t.id)).toEqual(['ok', 'gone', 'wrong-type']);
     expect(data.transactions[1].categoryId).toBe(OTHER_EXPENSE);
@@ -257,6 +312,18 @@ describe('storage', () => {
     expect(data.categoryBudgets).toEqual({ 'exp-food': 5000 });
     expect(data.settings.theme).toBe('system');
     expect(data.settings.monthlyBudget).toBeNull();
+    expect(data.settings.openingBalance).toBe(0);
+    expect(data.savings).toEqual([
+      { id: 's1', item: 'Cake', amount: 3000, date: '2026-10-01', createdAt: 1 },
+      { id: 's2', item: 'Something I skipped', amount: 500, date: '2026-10-02', createdAt: 0 },
+    ]);
+  });
+
+  it('keeps a negative opening balance and fills in fields older data lacks', () => {
+    expect(sanitize({ settings: { openingBalance: -2500 } }).settings.openingBalance).toBe(-2500);
+    const old = sanitize({ transactions: [], settings: { currency: 'INR', theme: 'dark', monthlyBudget: null } });
+    expect(old.savings).toEqual([]);
+    expect(old.settings.openingBalance).toBe(0);
   });
 
   it('always keeps the two Other categories', () => {
@@ -280,10 +347,15 @@ describe('csv', () => {
       DEFAULT_CATEGORIES,
       'INR',
     );
-    expect(csv.startsWith('﻿Date,Type,Category,Amount,Currency,Note\r\n')).toBe(true);
+    expect(csv.startsWith('\ufeffDate,Type,Category,Amount,Currency,Note,Balance after\r\n')).toBe(true);
     const lines = csv.slice(1).trim().split('\r\n');
-    expect(lines[1]).toBe('2026-10-02,Expense,Food & dining,10.00,INR,"Lunch, with ""Sam"""');
-    expect(lines[2]).toBe(`2026-10-01,Expense,Food & dining,0.05,INR,"'=HYPERLINK(""x"")"`);
+    expect(lines[1]).toBe('2026-10-02,Expense,Food & dining,10.00,INR,"Lunch, with ""Sam""",-10.05');
+    expect(lines[2]).toBe(`2026-10-01,Expense,Food & dining,0.05,INR,"'=HYPERLINK(""x"")",-0.05`);
+  });
+
+  it('starts the balance column from the opening amount', () => {
+    const csv = toCSV([tx({ amount: 2500 })], DEFAULT_CATEGORIES, 'INR', 10000);
+    expect(csv.trim().split('\r\n')[1].endsWith(',75.00')).toBe(true);
   });
 });
 
@@ -296,5 +368,9 @@ describe('sample data', () => {
     expect(sanitize({ transactions: list }).transactions).toHaveLength(list.length);
     expect(list.every((t) => t.amount % 100 === 0)).toBe(true);
     expect(sampleTransactions('USD', now).some((t) => t.amount % 100 !== 0)).toBe(true);
+    expect(sampleOpeningBalance('INR')).toBe(500000);
+    const savings = sampleSavings('INR', now);
+    expect(sanitize({ savings }).savings).toHaveLength(savings.length);
+    expect(savings.every((s) => s.date <= '2026-10-22')).toBe(true);
   });
 });

@@ -6,9 +6,11 @@ import { useCategoryMap, useStore } from '../store';
 
 export function TransactionRow({ tx, onOpen }: { tx: Transaction; onOpen: (tx: Transaction) => void }) {
   const categories = useCategoryMap();
-  const { currency } = useStore().data.settings;
+  const store = useStore();
+  const { currency } = store.data.settings;
   const category = categories.get(tx.categoryId);
   const signed = tx.type === 'income' ? tx.amount : -tx.amount;
+  const left = store.balances.after.get(tx.id);
   return (
     <li>
       <button className="tx-row" onClick={() => onOpen(tx)}>
@@ -19,7 +21,10 @@ export function TransactionRow({ tx, onOpen }: { tx: Transaction; onOpen: (tx: T
           <span className="tx-title">{tx.note || category?.name || 'Unknown'}</span>
           {tx.note && <span className="tx-sub">{category?.name ?? 'Unknown'}</span>}
         </span>
-        <span className={`tx-amount ${tx.type}`}>{formatMoney(signed, currency, { sign: true })}</span>
+        <span className="tx-figures">
+          <span className={`tx-amount ${tx.type}`}>{formatMoney(signed, currency, { sign: true })}</span>
+          {left !== undefined && <span className={`tx-left ${left < 0 ? 'negative' : ''}`}>{formatMoney(left, currency)} left</span>}
+        </span>
       </button>
     </li>
   );

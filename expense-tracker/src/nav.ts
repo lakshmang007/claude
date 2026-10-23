@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { TxType } from './types';
 
-export type Tab = 'home' | 'transactions' | 'stats' | 'settings';
-const TABS: Tab[] = ['home', 'transactions', 'stats', 'settings'];
+export type Tab = 'home' | 'transactions' | 'savings' | 'stats' | 'settings';
+const TABS: Tab[] = ['home', 'transactions', 'savings', 'stats', 'settings'];
 
 export type Overlay =
   | { kind: 'transaction'; id?: string; type?: TxType }
-  | { kind: 'category'; id?: string; type: TxType };
+  | { kind: 'category'; id?: string; type: TxType }
+  | { kind: 'balance' }
+  | { kind: 'saving'; id?: string };
 
 interface NavState {
   tab: Tab;

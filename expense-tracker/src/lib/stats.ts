@@ -1,4 +1,4 @@
-import type { Category, Transaction, TxType } from '../types';
+import type { Category, Saving, Transaction, TxType } from '../types';
 import { currentMonth, daysInMonth, monthOf, shiftMonth, todayISO } from './dates';
 import { SCALE } from './money';
 
@@ -102,6 +102,25 @@ export function newestFirst(a: Transaction, b: Transaction): number {
   return a.date < b.date ? 1 : a.date > b.date ? -1 : b.createdAt - a.createdAt;
 }
 
+const signed = (tx: Transaction) => (tx.type === 'income' ? tx.amount : -tx.amount);
+
+/** Money on hand today: the opening balance plus every entry dated today or earlier. */
+export function balanceNow(transactions: Transaction[], openingBalance: number, now = new Date()): number {
+  const today = todayISO(now);
+  return transactions.reduce((sum, tx) => (tx.date <= today ? sum + signed(tx) : sum), openingBalance);
+}
+
+/** The money left after each entry, taking entries in date order (then the order they were added). */
+export function runningBalances(transactions: Transaction[], openingBalance: number): Map<string, number> {
+  const after = new Map<string, number>();
+  let balance = openingBalance;
+  for (const tx of [...transactions].sort((a, b) => newestFirst(b, a))) {
+    balance += signed(tx);
+    after.set(tx.id, balance);
+  }
+  return after;
+}
+
 export interface DayGroup {
   date: string;
   items: Transaction[];
@@ -129,4 +148,30 @@ export type BudgetLevel = 'ok' | 'near' | 'over';
 export function budgetLevel(spent: number, limit: number): BudgetLevel {
   if (spent > limit) return 'over';
   return spent >= limit * 0.8 ? 'near' : 'ok';
+}
+
+export interface CravingPick {
+  item: string;
+  /** What it cost the last time it was skipped. */
+  amount: number;
+  count: number;
+}
+
+/** Cravings skipped before, most often first, so they can be logged again with one tap. */
+export function frequentCravings(savings: Saving[], limit = 6): CravingPick[] {
+  const picks = new Map<string, CravingPick & { last: number }>();
+  for (const saving of [...savings].sort((a, b) => a.createdAt - b.createdAt)) {
+    const key = saving.item.trim().toLowerCase();
+    const pick = picks.get(key);
+    picks.set(key, { item: saving.item, amount: saving.amount, count: (pick?.count ?? 0) + 1, last: saving.createdAt });
+  }
+  return [...picks.values()]
+    .sort((a, b) => b.count - a.count || b.last - a.last)
+    .slice(0, limit)
+    .map(({ item, amount, count }) => ({ item, amount, count }));
+}
+
+/** Newest first, like transactions. */
+export function sortSavings(savings: Saving[]): Saving[] {
+  return [...savings].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.createdAt - a.createdAt));
 }

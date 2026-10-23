@@ -1,19 +1,11 @@
 import { useState, type FormEvent } from 'react';
 import type { TxType } from '../types';
-import { amountToInput, formatMoney, parseAmount } from '../lib/money';
+import { amountToInput, currencySymbol, formatMoney, parseAmount } from '../lib/money';
 import { isValidISODate, todayISO, toISODate } from '../lib/dates';
 import { useStore } from '../store';
 import { useFeedback } from './Feedback';
 import { Icon } from './Icon';
 import { Sheet } from './Sheet';
-
-function currencySymbol(currency: string): string {
-  return (
-    new Intl.NumberFormat(undefined, { style: 'currency', currency, currencyDisplay: 'narrowSymbol' })
-      .formatToParts(0)
-      .find((part) => part.type === 'currency')?.value ?? currency
-  );
-}
 
 interface Props {
   id?: string;
@@ -68,7 +60,7 @@ export function TransactionSheet({ id, initialType, defaultDate, onClose }: Prop
       notify('Changes saved');
     } else {
       store.addTransaction(input);
-      notify(`${type === 'expense' ? 'Spent' : 'Received'} ${formatMoney(amount, settings.currency)} · ${name}`);
+      notify(`${type === 'expense' ? 'Spent' : 'Added'} ${formatMoney(amount, settings.currency)} · ${name}`);
     }
     onClose();
   };
@@ -82,7 +74,7 @@ export function TransactionSheet({ id, initialType, defaultDate, onClose }: Prop
 
   return (
     <Sheet
-      title={existing ? 'Edit transaction' : type === 'expense' ? 'Add expense' : 'Add income'}
+      title={existing ? 'Edit transaction' : type === 'expense' ? 'Add expense' : 'Add money'}
       onClose={onClose}
       footer={
         <div className="sheet-actions">

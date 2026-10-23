@@ -3,10 +3,11 @@
 Track what you spend and earn, from your phone. It works offline, has no account and no ads, and your data never leaves the device.
 
 <p>
-  <img src="docs/light-home.png" width="200" alt="Home: this month's balance, budget and top spending">
+  <img src="docs/light-home.png" width="200" alt="Home: the money you have, with Add money and Add expense, then the month's figures">
+  <img src="docs/light-savings.png" width="200" alt="Savings: money saved by skipping cravings">
   <img src="docs/light-add.png" width="200" alt="Adding an expense: amount, category, date and note">
   <img src="docs/light-stats.png" width="200" alt="Stats: spending by category and by month">
-  <img src="docs/light-history.png" width="200" alt="History: searchable list grouped by day">
+  <img src="docs/light-history.png" width="200" alt="History: searchable list grouped by day, with the money left after each entry">
   <img src="docs/dark-home.png" width="200" alt="Home in dark mode">
 </p>
 
@@ -34,13 +35,15 @@ After the first visit it opens with no connection.
 
 ## What it does
 
-- **Add an expense or income in a few taps:** amount, category, date (with Today and Yesterday shortcuts) and an optional note. Tap any entry to edit or delete it; a deleted entry can be brought back with **Undo**.
-- **Home:** the month's balance, income and spending, a budget bar, top spending categories and recent entries. Use the arrows to move between months.
+- **Money you have:** set how much you have once. **Add money** raises it, every **Add expense** lowers it, and each entry in the list shows what was left after it. Counted your cash and it differs? Tap **Change** and type the real amount; your entries stay as they are.
+- **Savings from skipped cravings:** wanted a ₹30 chocolate cake and didn't buy it? Tap **Skipped a craving?** and that ₹30 counts as saved. Home shows how much of your money is in savings and how much is free to spend, and the Savings tab lists what you skipped, with one-tap buttons for the things you skip often.
+- **Add an expense or money in a few taps:** amount, category, date (with Today and Yesterday shortcuts) and an optional note. Tap any entry to edit or delete it; a deleted entry can be brought back with **Undo**.
+- **Home:** the money you have, then the month's money in, spending and what is left over, a budget bar, top spending categories and recent entries. Use the arrows to move between months.
 - **History:** every entry grouped by day, with search (notes, categories, amounts) and filters by type, category, month or all time.
-- **Stats:** total spent with the change from last month, income, savings and spending per day; spending or income by category; the last six months as a chart and a table.
+- **Stats:** total spent with the change from last month, income, what was left over and spending per day; spending or income by category; the last six months as a chart and a table.
 - **Budgets:** a monthly limit and optional limits per category. The bar turns amber at 80% and red when you go over, with a label saying so.
 - **Categories:** 19 built in, with emoji. Rename, change the icon, add your own or delete them. Entries from a deleted category move to "Other".
-- **Your data:** back up to a file and restore it (on a new phone, for example), or export a CSV for Excel or Google Sheets. In the Android app these open the share sheet, so you can save to Files or Drive or send the file to yourself.
+- **Your data:** back up to a file and restore it (on a new phone, for example), or export a CSV for Excel or Google Sheets (with the balance after each entry). In the Android app these open the share sheet, so you can save to Files or Drive or send the file to yourself.
 - **Any currency:** it guesses from your phone's time zone and language (₹ in India), and you can change it in Settings. Changing it only changes the symbol; amounts are not converted.
 - Light and dark theme (follows the phone, or pick one), and the phone's Back button closes sheets before it leaves the app.
 

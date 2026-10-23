@@ -47,7 +47,7 @@ export function Stats({ month, setMonth, showCategory }: ScreenProps) {
             <span className="tile-value">{formatMoney(totals.income, currency)}</span>
           </div>
           <div className="tile">
-            <span className="tile-label">Saved</span>
+            <span className="tile-label">Left over</span>
             <span className="tile-value">{formatMoney(totals.net, currency)}</span>
           </div>
           <div className="tile">
@@ -98,7 +98,7 @@ export function Stats({ month, setMonth, showCategory }: ScreenProps) {
               <th scope="col">Month</th>
               <th scope="col">Earned</th>
               <th scope="col">Spent</th>
-              <th scope="col">Saved</th>
+              <th scope="col">Left over</th>
             </tr>
           </thead>
           <tbody>

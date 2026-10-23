@@ -1,9 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
 async function addTransaction(page: Page, { amount, category, note, income }: { amount: string; category: string; note?: string; income?: boolean }) {
-  const first = page.getByRole('button', { name: 'Add your first expense' });
-  if (await first.isVisible()) await first.click();
-  else await page.getByRole('button', { name: 'Add transaction' }).click();
+  await page.getByRole('button', { name: 'Add transaction' }).click();
   const sheet = page.getByRole('dialog');
   if (income) await sheet.getByRole('radio', { name: 'Income' }).click();
   await sheet.getByLabel('Amount').fill(amount);
@@ -18,7 +16,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test('records an expense and an income and shows the month balance', async ({ page }) => {
-  await expect(page.getByRole('heading', { name: 'Know where your money goes' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Get started' })).toBeVisible();
   await expect(page.getByLabel('Your currency')).toHaveValue('INR');
 
   await addTransaction(page, { amount: '250', category: 'Food & dining', note: 'Biryani' });
@@ -36,7 +34,7 @@ test('records an expense and an income and shows the month balance', async ({ pa
 });
 
 test('explains what is missing instead of saving a bad entry', async ({ page }) => {
-  await page.getByRole('button', { name: 'Add your first expense' }).click();
+  await page.getByRole('button', { name: 'Add expense' }).click();
   const sheet = page.getByRole('dialog');
   await sheet.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(sheet.getByRole('alert')).toContainText('Enter an amount');
@@ -133,7 +131,7 @@ test('backs up, erases and restores', async ({ page }) => {
   await page.getByRole('button', { name: 'Erase everything' }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'Erase' }).click();
   await page.getByRole('navigation').getByRole('button', { name: 'Home' }).click();
-  await expect(page.getByRole('heading', { name: 'Know where your money goes' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Get started' })).toBeVisible();
 
   await page.getByRole('navigation').getByRole('button', { name: 'Settings' }).click();
   await page.locator('input[type=file]').setInputFiles(file);
@@ -198,6 +196,98 @@ test('installs as an offline app', async ({ page, context }) => {
   await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
   await context.setOffline(true);
   await page.reload();
-  await expect(page.getByRole('heading', { name: 'Know where your money goes' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Get started' })).toBeVisible();
   await context.setOffline(false);
+});
+
+test('keeps a running total: set it, add money, add expenses, correct it', async ({ page }) => {
+  const wallet = page.getByRole('region', { name: 'Money you have' });
+  await expect(wallet).toContainText('₹0');
+  await wallet.getByRole('button', { name: 'Set amount' }).click();
+  await page.getByLabel('Amount you have').fill('10,000');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(wallet).toContainText('₹10,000');
+
+  await wallet.getByRole('button', { name: 'Add expense' }).click();
+  await expect(page.getByRole('dialog', { name: 'Add expense' })).toBeVisible();
+  await page.getByLabel('Amount').fill('250');
+  await page.getByRole('dialog').getByRole('button', { name: 'Food & dining', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(wallet).toContainText('₹9,750');
+
+  await wallet.getByRole('button', { name: 'Add money' }).click();
+  await expect(page.getByRole('dialog', { name: 'Add money' })).toBeVisible();
+  await page.getByLabel('Amount').fill('1000');
+  await page.getByRole('dialog').getByRole('button', { name: 'Allowance', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('Added ₹1,000 · Allowance');
+  await expect(wallet).toContainText('₹10,750');
+
+  // Each entry shows what was left after it.
+  await expect(page.getByRole('button', { name: /Food & dining −₹250 ₹9,750 left/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Allowance \+₹1,000 ₹10,750 left/ })).toBeVisible();
+
+  // Counting the cash and correcting the total keeps the entries.
+  await wallet.getByRole('button', { name: 'Change' }).click();
+  await expect(page.getByLabel('Amount you have')).toHaveValue('10750');
+  await page.getByLabel('Amount you have').fill('10000');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(wallet).toContainText('₹10,000');
+  await expect(page.getByRole('button', { name: /Allowance \+₹1,000 ₹10,000 left/ })).toBeVisible();
+
+  // Spending more than you have is flagged.
+  await page.getByRole('button', { name: 'Add transaction' }).click();
+  await page.getByLabel('Amount').fill('12000');
+  await page.getByRole('dialog').getByRole('button', { name: 'Rent', exact: true }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(wallet).toContainText('−₹2,000');
+  await expect(wallet).toContainText('You have spent more than you had');
+
+  await page.reload();
+  await expect(page.getByRole('region', { name: 'Money you have' })).toContainText('−₹2,000');
+});
+
+test('skipped cravings go into savings', async ({ page }) => {
+  const wallet = page.getByRole('region', { name: 'Money you have' });
+  await wallet.getByRole('button', { name: 'Set amount' }).click();
+  await page.getByLabel('Amount you have').fill('500');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+
+  await wallet.getByRole('button', { name: 'Skipped a craving? Save it' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Skip a craving' });
+  await sheet.getByRole('button', { name: 'Add to savings' }).click();
+  await expect(sheet.getByRole('alert')).toContainText('Say what you skipped');
+  await sheet.getByLabel('What did you skip?').fill('Chocolate cake');
+  await sheet.getByLabel('What it would have cost').fill('30');
+  await sheet.getByRole('button', { name: 'Add to savings' }).click();
+  await expect(page.getByRole('status')).toContainText('₹30 saved by skipping Chocolate cake');
+
+  // The money stays yours, and the jar shows what is set aside.
+  await expect(wallet).toContainText('₹500');
+  await expect(wallet).toContainText('In savings ₹30');
+  await expect(wallet).toContainText('Free to spend ₹470');
+
+  await page.getByRole('navigation').getByRole('button', { name: 'Savings' }).click();
+  const jar = page.getByRole('region', { name: 'Savings jar' });
+  await expect(jar).toContainText('₹30');
+  await expect(jar).toContainText('Cravings skipped1');
+
+  // Skip it again with one tap, then undo.
+  await page.getByRole('button', { name: 'Chocolate cake · ₹30' }).click();
+  await expect(jar).toContainText('₹60');
+  await page.getByRole('button', { name: 'Undo' }).click();
+  await expect(jar).toContainText('Cravings skipped1');
+
+  // Edit and delete from the list.
+  await page.getByRole('button', { name: /Chocolate cake Today \+₹30/ }).click();
+  await page.getByRole('dialog').getByLabel('What it would have cost').fill('45');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  await expect(jar).toContainText('₹45');
+  await page.getByRole('button', { name: /Chocolate cake Today \+₹45/ }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Delete' }).click();
+  await expect(page.getByText('Nothing saved yet.')).toBeVisible();
+
+  // On the Savings tab, the + button logs a craving.
+  await page.getByRole('button', { name: 'Skip a craving' }).last().click();
+  await expect(page.getByRole('dialog', { name: 'Skip a craving' })).toBeVisible();
 });

@@ -1,4 +1,4 @@
-import type { AppData, Category, Settings, ThemePref, Transaction, TxType } from '../types';
+import type { AppData, Category, Saving, Settings, ThemePref, Transaction, TxType } from '../types';
 import { isValidISODate } from './dates';
 import { createInitialData, DEFAULT_CATEGORIES, otherCategoryId } from './defaults';
 import { isSupportedCurrency } from './money';
@@ -53,6 +53,24 @@ function sanitizeTransactions(raw: unknown, categories: Category[]): Transaction
   return transactions;
 }
 
+function sanitizeSavings(raw: unknown): Saving[] {
+  const seen = new Set<string>();
+  const savings: Saving[] = [];
+  for (const item of Array.isArray(raw) ? raw : []) {
+    if (!isObject(item) || typeof item.id !== 'string' || !item.id || seen.has(item.id) || !isAmount(item.amount)) continue;
+    if (typeof item.date !== 'string' || !isValidISODate(item.date)) continue;
+    seen.add(item.id);
+    savings.push({
+      id: item.id,
+      item: text(item.item, 60) || 'Something I skipped',
+      amount: item.amount,
+      date: item.date,
+      createdAt: typeof item.createdAt === 'number' && Number.isFinite(item.createdAt) ? item.createdAt : 0,
+    });
+  }
+  return savings;
+}
+
 function sanitizeSettings(raw: unknown, fallback: Settings): Settings {
   const settings = isObject(raw) ? raw : {};
   const themes: ThemePref[] = ['system', 'light', 'dark'];
@@ -60,6 +78,7 @@ function sanitizeSettings(raw: unknown, fallback: Settings): Settings {
     currency: typeof settings.currency === 'string' && isSupportedCurrency(settings.currency) ? settings.currency : fallback.currency,
     theme: themes.includes(settings.theme as ThemePref) ? (settings.theme as ThemePref) : fallback.theme,
     monthlyBudget: isAmount(settings.monthlyBudget) ? settings.monthlyBudget : null,
+    openingBalance: Number.isSafeInteger(settings.openingBalance) ? (settings.openingBalance as number) : 0,
   };
 }
 
@@ -80,6 +99,7 @@ export function sanitize(raw: unknown): AppData {
     transactions: sanitizeTransactions(raw.transactions, categories),
     categories,
     categoryBudgets,
+    savings: sanitizeSavings(raw.savings),
     settings: sanitizeSettings(raw.settings, initial.settings),
   };
 }

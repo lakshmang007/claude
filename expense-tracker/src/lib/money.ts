@@ -6,16 +6,16 @@ const MAX_WHOLE_DIGITS = 12;
 /**
  * Parses what someone typed into an amount field. Accepts "1250", "1,250.50",
  * "12.5" and a decimal comma ("12,50"). Returns hundredths, or null when the
- * text is not a positive amount with at most two decimals.
+ * text is not a positive amount (or zero, with allowZero) with at most two decimals.
  */
-export function parseAmount(input: string): number | null {
-  let text = input.trim().replace(/[\s  ']/g, '');
+export function parseAmount(input: string, { allowZero = false } = {}): number | null {
+  let text = input.trim().replace(/[\s\u00a0\u202f']/g, '');
   if (!text.includes('.') && /^\d+,\d{1,2}$/.test(text)) text = text.replace(',', '.');
   else text = text.replace(/,/g, '');
   const match = new RegExp(`^(\\d{0,${MAX_WHOLE_DIGITS}})(?:\\.(\\d{0,2}))?$`).exec(text);
   if (!match || (match[1] === '' && !match[2])) return null;
   const value = Number(match[1] || '0') * SCALE + Number((match[2] ?? '').padEnd(2, '0'));
-  return value > 0 ? value : null;
+  return value > 0 || (allowZero && value === 0) ? value : null;
 }
 
 /** The text to pre-fill an amount field with when editing. */
@@ -74,6 +74,15 @@ export function formatMoney(amount: number, currency: string, options: MoneyForm
   return formatter(currency, amount % SCALE !== 0, options.sign ?? false)
     .format(units)
     .replace('-', '−');
+}
+
+/** The short symbol shown before an amount field: ₹, $, €. */
+export function currencySymbol(currency: string): string {
+  return (
+    new Intl.NumberFormat(undefined, { style: 'currency', currency, currencyDisplay: 'narrowSymbol' })
+      .formatToParts(0)
+      .find((part) => part.type === 'currency')?.value ?? currency
+  );
 }
 
 export function isSupportedCurrency(code: string): boolean {

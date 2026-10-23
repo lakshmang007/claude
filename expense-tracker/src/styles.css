@@ -18,6 +18,9 @@
   --income: #0ca30c;
   --expense: #eb6834;
   --income-text: #006300;
+  --expense-text: #a3401a;
+  --money-in-wash: #e2f3e2;
+  --money-out-wash: #fbe7de;
   --critical-text: #b42f2f;
   --st-good: #0ca30c;
   --st-warning: #fab219;
@@ -53,6 +56,9 @@
     --income: #0ca30c;
     --expense: #d95926;
     --income-text: #3fc23f;
+    --expense-text: #ff9b70;
+    --money-in-wash: #15301a;
+    --money-out-wash: #3a2016;
     --critical-text: #ff8a80;
     --shadow: none;
     --backdrop: rgba(0, 0, 0, 0.6);
@@ -79,6 +85,9 @@
   --income: #0ca30c;
   --expense: #d95926;
   --income-text: #3fc23f;
+  --expense-text: #ff9b70;
+  --money-in-wash: #15301a;
+  --money-out-wash: #3a2016;
   --critical-text: #ff8a80;
   --shadow: none;
   --backdrop: rgba(0, 0, 0, 0.6);
@@ -455,8 +464,6 @@ a.btn {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  text-align: center;
-  padding: 28px 20px 20px;
 }
 
 .welcome .field {
@@ -467,10 +474,6 @@ a.btn {
   color: var(--ink-2);
 }
 
-.welcome-art {
-  font-size: 3.2rem;
-  line-height: 1;
-}
 
 .balance {
   display: flex;
@@ -539,6 +542,127 @@ a.btn {
 
 .dot-expense {
   background: var(--expense);
+}
+
+/* Money you have */
+
+.wallet {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wallet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -6px 0 -2px;
+}
+
+.hero-figure.negative {
+  color: var(--critical-text);
+}
+
+.wallet-warning {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--critical-text);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.wallet-split {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin-top: 4px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-size: 0.88rem;
+  text-align: left;
+}
+
+.wallet-split span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wallet-split strong {
+  color: var(--ink);
+}
+
+.wallet-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.btn-money-in {
+  background: var(--money-in-wash);
+  color: var(--income-text);
+}
+
+.btn-money-out {
+  background: var(--money-out-wash);
+  color: var(--expense-text);
+}
+
+.btn-craving {
+  grid-column: 1 / -1;
+  background: transparent;
+  border-color: var(--border);
+  color: var(--ink-2);
+  min-height: 44px;
+  font-size: 0.92rem;
+}
+
+.btn-small {
+  min-height: 40px;
+  padding: 0 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.steps {
+  margin: 0;
+  padding-left: 1.3em;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  color: var(--ink-2);
+}
+
+.tiles.tiles-flush {
+  margin-top: 0;
+}
+
+.jar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.jar .tiles {
+  grid-template-columns: 1fr 1fr;
+  margin: 10px 0 14px;
+}
+
+.pick-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.muted.spaced-below {
+  margin: -6px 0 12px;
 }
 
 /* Transactions */
@@ -687,6 +811,23 @@ a.btn {
   flex: none;
   font-weight: 650;
   font-variant-numeric: tabular-nums;
+}
+
+.tx-figures {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.tx-left {
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.tx-left.negative {
+  color: var(--critical-text);
 }
 
 .tx-amount.income {
@@ -1451,4 +1592,8 @@ a.btn {
     animation: none !important;
     transition: none !important;
   }
+}
+
+.tx-form > p.muted {
+  margin-bottom: 14px;
 }

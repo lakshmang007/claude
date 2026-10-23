@@ -8,7 +8,7 @@ import { todayISO } from '../lib/dates';
 import { createInitialData } from '../lib/defaults';
 import { saveTextFile } from '../lib/files';
 import { APK_RELEASE_URL, canPromptInstall, isDemo, isIOS, isStandalone, onInstallChange, promptInstall } from '../lib/install';
-import { amountToInput, currencyLabel, CURRENCIES, parseAmount } from '../lib/money';
+import { amountToInput, currencyLabel, CURRENCIES, formatMoney, parseAmount } from '../lib/money';
 import { SAMPLE_PREFIX } from '../lib/sample';
 import { parseBackup, serializeBackup } from '../lib/storage';
 import { useStore } from '../store';
@@ -43,14 +43,16 @@ function LimitInput({ value, onSave, label }: { value: number | null; onSave: (l
   );
 }
 
-export function Settings({ openCategory }: ScreenProps) {
+export function Settings({ openCategory, openBalance }: ScreenProps) {
   const store = useStore();
   const { notify, confirm } = useFeedback();
   const { transactions, categories, categoryBudgets, settings } = store.data;
   const fileInput = useRef<HTMLInputElement>(null);
   const [installable, setInstallable] = useState(canPromptInstall());
   useEffect(() => onInstallChange(() => setInstallable(canPromptInstall())), []);
-  const samples = transactions.filter((tx) => tx.id.startsWith(SAMPLE_PREFIX)).length;
+  const samples =
+    transactions.filter((tx) => tx.id.startsWith(SAMPLE_PREFIX)).length +
+    store.data.savings.filter((s) => s.id.startsWith(SAMPLE_PREFIX)).length;
   const expenseCategories = categories.filter((c) => c.type === 'expense');
 
   const run = async (task: () => Promise<void>) => {
@@ -62,7 +64,7 @@ export function Settings({ openCategory }: ScreenProps) {
   };
 
   const exportCSV = () =>
-    run(() => saveTextFile(`expenses-${todayISO()}.csv`, toCSV(transactions, categories, settings.currency), 'text/csv'));
+    run(() => saveTextFile(`expenses-${todayISO()}.csv`, toCSV(transactions, categories, settings.currency, settings.openingBalance), 'text/csv'));
 
   const backup = () =>
     run(() => saveTextFile(`expense-tracker-backup-${todayISO()}.json`, serializeBackup(store.data), 'application/json'));
@@ -90,19 +92,24 @@ export function Settings({ openCategory }: ScreenProps) {
   const removeSamples = async () => {
     const ok = await confirm({
       title: 'Remove sample data?',
-      message: `Deletes the ${samples} sample transactions. Anything you added yourself stays.`,
+      message: `Deletes the ${samples} sample entries and the sample starting amount, so set the money you have again afterwards. Anything you added yourself stays.`,
       confirmLabel: 'Remove',
       danger: true,
     });
     if (!ok) return;
-    store.replaceAll({ ...store.data, transactions: transactions.filter((tx) => !tx.id.startsWith(SAMPLE_PREFIX)) });
+    store.replaceAll({
+      ...store.data,
+      transactions: transactions.filter((tx) => !tx.id.startsWith(SAMPLE_PREFIX)),
+      savings: store.data.savings.filter((s) => !s.id.startsWith(SAMPLE_PREFIX)),
+      settings: { ...settings, openingBalance: 0 },
+    });
     notify('Sample data removed');
   };
 
   const eraseAll = async () => {
     const ok = await confirm({
       title: 'Erase everything?',
-      message: `Deletes all ${transactions.length} transactions, your categories and budgets from this device. Make a backup first if you might want them back.`,
+      message: `Deletes all ${transactions.length} transactions, your savings, categories, budgets and the money you have from this device. Make a backup first if you might want them back.`,
       confirmLabel: 'Erase',
       danger: true,
     });
@@ -184,6 +191,12 @@ export function Settings({ openCategory }: ScreenProps) {
 
       <section className="card">
         <h2>Preferences</h2>
+        <div className="limit-row">
+          <span>Money you have</span>
+          <button className="btn btn-outline btn-small" onClick={openBalance}>
+            {formatMoney(store.balances.now, settings.currency)}
+          </button>
+        </div>
         <label className="field">
           <span>Currency</span>
           <select value={settings.currency} onChange={(event) => store.updateSettings({ currency: event.target.value })}>
@@ -272,7 +285,12 @@ export function Settings({ openCategory }: ScreenProps) {
             Remove sample data
           </button>
         )}
-        <button className="btn btn-ghost btn-danger-text btn-block" onClick={eraseAll} disabled={transactions.length === 0 && Object.keys(categoryBudgets).length === 0}>
+        <button className="btn btn-ghost btn-danger-text btn-block" onClick={eraseAll} disabled={
+            transactions.length === 0 &&
+            store.data.savings.length === 0 &&
+            settings.openingBalance === 0 &&
+            Object.keys(categoryBudgets).length === 0
+          }>
           <Icon name="trash" size={18} /> Erase everything
         </button>
       </section>
