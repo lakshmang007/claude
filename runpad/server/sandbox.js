@@ -109,7 +109,8 @@ export class Sandbox {
 
   /** The commands that cover up hidden directories inside a mount namespace. */
   #hideScript() {
-    return this.hide.map((dir) => `${quote(this.mount)} -t tmpfs -o size=16k,mode=0755 runpad-hidden ${quote(dir)}`).join(' && ');
+    // A directory the program cannot even reach (say, under a 0700 parent) needs no cover.
+    return this.hide.map((dir) => `{ [ ! -e ${quote(dir)} ] || ${quote(this.mount)} -t tmpfs -o size=16k,mode=0755 runpad-hidden ${quote(dir)}; }`).join(' && ');
   }
 
   /** Works out whether `unshare` isolation is available. */

@@ -71,6 +71,15 @@ export function loadLanguage(id: string): Promise<Extension> {
   return p;
 }
 
+/**
+ * Language support for the editor. Brackets and quotes close themselves only in code:
+ * a plain-text pad behaves like a plain notepad, and before a new pad's language is
+ * detected, auto-closing would not know about things like Python's f"" strings.
+ */
+export function languageSupport(id: string, ext: Extension): Extension {
+  return id === 'plaintext' || id === 'markdown' ? ext : [ext, closeBrackets()];
+}
+
 export const compartments = {
   language: new Compartment(),
   theme: new Compartment(),
@@ -147,7 +156,6 @@ export function createState(opts: {
       EditorState.allowMultipleSelections.of(true),
       indentOnInput(),
       bracketMatching(),
-      closeBrackets(),
       autocompletion({ activateOnTyping: true }),
       rectangularSelection(),
       crosshairCursor(),

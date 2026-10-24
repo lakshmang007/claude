@@ -2,7 +2,9 @@
 
 **A Dontpad-style shared notepad that also runs your code.** Open any address, such as `yourserver/cs101/lab3`, and start typing. Everything is saved as you type and shared live with everyone who opens the same address. There are no accounts. On top of that, RunPad can compile and run programs (with input), has a terminal, keeps version history, and can lock pads with a password.
 
-![Running a C program with typed input while a classmate edits](docs/run.png)
+![Demo: typing and running a Python program with input, a classmate editing live, a two-file C program with a clickable compile error, the terminal, history, a password lock and an HTML preview](docs/demo.gif)
+
+*A 90-second walkthrough recorded from a real server ([MP4](docs/demo.mp4)).*
 
 ## RunPad compared with Dontpad
 

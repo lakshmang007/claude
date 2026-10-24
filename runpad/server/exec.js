@@ -124,6 +124,20 @@ export class ExecServer {
       await fsp.chmod(path.join(helpers, name), 0o644);
     }
     useHelpersDir(helpers);
+    if (this.sandbox.uid !== null) {
+      // Every run would fail with "Permission denied"; say so now instead.
+      const probe = spawnSync('/bin/sh', ['-c', 'cd "$1" && test -r "$2"', 'probe', this.runsDir, path.join(helpers, 'rp_sync.rb')], {
+        uid: this.sandbox.uid,
+        gid: this.sandbox.gid ?? this.sandbox.uid,
+        stdio: 'ignore',
+      });
+      if (probe.status !== 0) {
+        throw new Error(
+          `Programs run as uid ${this.sandbox.uid}, which cannot enter ${this.config.workDir}. ` +
+            'Set RUNPAD_WORK to a directory whose parents everyone can enter, such as /tmp/runpad.',
+        );
+      }
+    }
     this.cleaner = setInterval(() => this.cleanWorkspaces().catch(() => {}), 3600_000);
     this.cleaner.unref?.();
     return this;

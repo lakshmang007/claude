@@ -4,7 +4,7 @@ import { isAttachableName, normalizePadPath, padUrl } from '../shared/padpath.js
 import { LANGUAGE_BY_ID, LANGUAGES, languageFromName, mainFileName } from '../shared/langs.js';
 import { replaceText } from '../shared/ytext.js';
 import { api, apiPath, type ChildPad, type PadInfo, type ServerConfig } from './api';
-import { compartments, createPlainState, createState, loadLanguage, readOnlyExtension, reconfigure } from './editor';
+import { compartments, createPlainState, createState, languageSupport, loadLanguage, readOnlyExtension, reconfigure } from './editor';
 import { ExecClient } from './exec';
 import { PadDoc } from './pad';
 import { rememberPad } from './recent';
@@ -630,7 +630,7 @@ export class PadApp {
     this.updatePreviewButton();
     const ext = await loadLanguage(lang);
     if (this.active.language !== lang) return;
-    this.view.dispatch({ effects: compartments.language.reconfigure(ext) });
+    this.view.dispatch({ effects: compartments.language.reconfigure(languageSupport(lang, ext)) });
   }
 
   renderLanguageOptions(): void {

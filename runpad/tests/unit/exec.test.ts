@@ -1,7 +1,9 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { LANGUAGES } from '../../shared/langs.js';
 import { javaMainClass } from '../../server/languages.js';
-import { ExecTestClient, exitOf, startTestServer, stderr, stdout, type ExecEvent, type TestServer } from './helpers';
+import { ExecTestClient, exitOf, startTestServer, stderr, stdout, tempDir, type ExecEvent, type TestServer } from './helpers';
 
 let srv: TestServer;
 let client: ExecTestClient;
@@ -158,6 +160,15 @@ describe('terminal', () => {
     await fetch(`${srv.url}/_api/lock`, { method: 'POST', body: JSON.stringify({ path: 'termlocked', password: 'pass1234', mode: 'readonly' }) });
     const events = await client.job({ type: 'cmd', pad: 'termlocked', language: 'plaintext', code: '', command: 'ls' });
     expect(exitOf(events)).toMatchObject({ type: 'error', code: 'locked' });
+  });
+});
+
+describe('startup checks', () => {
+  it.skipIf(process.getuid?.() !== 0)('refuses a work directory the sandbox user cannot enter', async () => {
+    const parent = tempDir('runpad-closed-');
+    fs.chmodSync(parent, 0o700);
+    await expect(startTestServer({ RUNPAD_WORK: path.join(parent, 'work'), RUNPAD_LANGUAGES: 'python' })).rejects.toThrow(/cannot enter/);
+    fs.rmSync(parent, { recursive: true, force: true });
   });
 });
 
