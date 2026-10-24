@@ -3,3 +3,4 @@ dist/
 data/
 test-results/
 playwright-report/
+deploy/.env

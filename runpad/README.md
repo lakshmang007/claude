@@ -47,16 +47,14 @@ Other computers on the same network can use the LAN address the server prints, f
 
 For development, `npm run dev` serves the app through Vite with hot reload on the same port.
 
-### Docker
+### As a public website
 
-The image includes all supported toolchains:
-
-```bash
-docker build -t runpad .
-docker run -d --name runpad -p 3000:3000 -v runpad-data:/data runpad
-```
-
-Pads are kept in the `/data` volume. Programs run as an unprivileged `runner` user that cannot read `/data`.
+**[deploy/DEPLOY.md](deploy/DEPLOY.md)** walks through putting RunPad on the internet with Docker Compose, in about 30 minutes. It covers:
+- automatic HTTPS through Caddy;
+- a locked-down container with a firewall for programs;
+- abuse limits;
+- an admin token;
+- backups.
 
 ## Using it
 
@@ -111,20 +109,27 @@ All settings are environment variables. The defaults suit a single machine or a 
 | `RUNPAD_SNAPSHOT_SECONDS`, `RUNPAD_HISTORY_ENTRIES`, `RUNPAD_HISTORY_MB` | `120`, `50`, `8` | History frequency and size per pad |
 | `RUNPAD_EXEC` | on | `off` turns off running code and the terminal |
 | `RUNPAD_TERMINAL` | on | `off` turns off only the terminal |
-| `RUNPAD_EXEC_TOKEN` | none | A run key. People must enter it once per browser to run code. Recommended on any server others can reach. |
+| `RUNPAD_EXEC_TOKEN` | none | A run key. People must enter it once per browser to run code. |
 | `RUNPAD_LANGUAGES` | all found | Comma-separated language ids to offer, e.g. `python,c,cpp,java` |
 | `RUNPAD_SANDBOX` | `auto` | `auto` uses namespace isolation when the kernel allows it; `unshare` requires it; `none` uses plain processes |
-| `RUNPAD_EXEC_UID`, `RUNPAD_EXEC_GID` | `65534` if the server runs as root | User that programs run as |
+| `RUNPAD_EXEC_UIDS` | `200000-200999` if the server runs as root | User ids to give each run a user of its own |
+| `RUNPAD_EXEC_UID`, `RUNPAD_EXEC_GID` | none | One user for all runs instead |
+| `RUNPAD_FIREWALL` | `auto` | Where namespaces are unavailable, block the sandbox users' network with iptables (needs root and `NET_ADMIN`); `require` refuses to start without it; `off` |
 | `RUNPAD_RUN_TIMEOUT` | `15` | Wall-clock seconds for a run with prepared input |
 | `RUNPAD_INTERACTIVE_TIMEOUT` | `300` | Wall-clock seconds while waiting for typed input, and for terminal commands |
 | `RUNPAD_COMPILE_TIMEOUT` | `30` | Seconds for compiling |
 | `RUNPAD_CPU_SECONDS` | `10` | CPU time per program |
 | `RUNPAD_MEMORY_MB` | `512` | Address-space limit (not applied to Java, JavaScript and Go, which have their own heap limits) |
 | `RUNPAD_FILE_MB`, `RUNPAD_MAX_OUTPUT_KB` | `16`, `512` | Largest file a program may write, and the most output it may print |
-| `RUNPAD_MAX_PROCS` | `128` | Process limit, applied when programs run as their own user |
+| `RUNPAD_MAX_PROCS` | `128` | Processes and threads per run, applied when runs have their own user |
 | `RUNPAD_MAX_CONCURRENT`, `RUNPAD_MAX_PER_CLIENT`, `RUNPAD_RUNS_PER_MINUTE` | `6`, `2`, `40` | Load limits |
 | `RUNPAD_WORKSPACE_MB`, `RUNPAD_WORKSPACE_IDLE_HOURS` | `64`, `24` | Terminal workspace size and lifetime |
-| `RUNPAD_TRUST_PROXY` | off | `1` takes the client IP from `X-Forwarded-For` (behind a reverse proxy) |
+| `RUNPAD_MAX_STORAGE_MB` | `2048` | Text in all pads together; once reached, pads can shrink but not grow |
+| `RUNPAD_WRITES_PER_MINUTE` | `120` | Saves, uploads and lock changes over HTTP per client IP |
+| `RUNPAD_MAX_SOCKETS_PER_IP` | `40` | Open editors and runs per client IP |
+| `RUNPAD_ADMIN_TOKEN` | none | Opens every pad and lock (send it as `X-Pad-Tokens`), for removing abuse; at least 16 characters |
+| `RUNPAD_CONTACT` | none | E-mail address or URL for reporting abuse, shown on the home page and in the menu |
+| `RUNPAD_TRUST_PROXY` | off | `1` takes the client IP from the last `X-Forwarded-For` entry (behind one reverse proxy) |
 
 Behind nginx, pass WebSockets through:
 
@@ -145,25 +150,37 @@ Like Dontpad, **anyone who knows a pad's address can read and change it** unless
 
 Running code is running other people's programs on your server. RunPad applies these protections to every run and terminal command:
 
-- **Resource limits.** CPU time, wall-clock time, memory, file size, output size and number of processes are capped. A program's whole process group is killed when it ends or is stopped.
+- **Resource limits.** CPU time, wall-clock time, memory, file size, output size and the number of processes are capped with `prlimit`. A program's whole process group is killed when it ends or is stopped.
+- **Never root, and a user per run.** When the server runs as root (as in Docker), every run and terminal command gets a temporary user of its own (`RUNPAD_EXEC_UIDS`). So:
+  - its files are private to it;
+  - other runs cannot look at its processes;
+  - a fork bomb only uses up its own process limit;
+  - anything it leaves running is frozen and killed when it ends.
+  - The data directory is readable only by the server.
 - **Clean environment.** Programs get a fresh environment with none of the server's variables. HOME and TMPDIR point to their own directory.
-- **Never root.** If the server runs as root, programs run as `nobody` (or `RUNPAD_EXEC_UID`). The data directory is only readable by the server.
-- **Isolation**, when the kernel allows unprivileged user namespaces, as most Linux distributions do and the startup log says:
-  - each run gets its own network namespace, so there is no network;
-  - its own PID namespace and `/proc`, so it cannot see or signal other programs;
-  - and a mount namespace in which the data directory is replaced by an empty one.
+- **No network**, in one of two ways, and the startup log says which:
+  - *Namespaces*, where the kernel allows unprivileged user namespaces, as most Linux distributions do. Each run gets its own network namespace (no network), PID namespace and `/proc` (cannot see other programs), and a mount namespace in which the data directory is replaced by an empty one.
+  - *Firewall*, where namespaces are blocked, as under Docker's default seccomp profile. An iptables rule rejects all traffic from the sandbox users. `deploy/docker-compose.yml` sets `RUNPAD_FIREWALL=require`, so the server refuses to start rather than let programs reach the network.
+- **The container** (`deploy/docker-compose.yml`):
+  - a read-only root filesystem;
+  - a minimal set of capabilities and `no-new-privileges`;
+  - programs can write only to their own directory, in a size-capped tmpfs;
+  - a container-wide process and memory cap;
+  - an init process that collects killed programs.
+- **Abuse limits:**
+  - runs, saves and open connections per client IP;
+  - a storage cap;
+  - HTML previews that only render inside the editor, never as pages of their own, so the site cannot host phishing pages;
+  - an admin token to remove pads;
+  - a report link.
 - **Previews.** HTML previews are served with `Content-Security-Policy: sandbox`, so a page's scripts cannot reach RunPad or your browser's stored unlock tokens.
 - **Locks.** Lock passwords are hashed with scrypt; tokens are HMAC-signed and stop working when the lock changes. Unlock attempts are rate-limited.
 
 What this does **not** protect against:
 
-- **Your user's own files.** When the server runs as your own user without `RUNPAD_EXEC_UID`, programs can read files your account can read. Only trusted people should run code on such a setup. For anything else:
-  - use the Docker image;
-  - or start RunPad as root with `RUNPAD_EXEC_UID` set to a dedicated account;
-  - and set `RUNPAD_EXEC_TOKEN`.
-- **Kernel exploits.** These are processes, not virtual machines.
-- **Docker without isolation.** Docker's default seccomp profile normally blocks the namespace isolation, so RunPad falls back to plain processes as the `runner` user. The startup log says which mode is active. Programs then have network access and can see other running programs. If that matters, run the container on an isolated network or under gVisor (`--runtime=runsc`).
-- **The shared Go build cache.** It is used by everyone's runs.
+- **Your user's own files.** When the server runs as your own user (not root), programs run as that user and can read files your account can read. Only trusted people should run code on such a setup. For a server others use, use `deploy/` or start RunPad as root.
+- **Kernel exploits.** These are processes sharing one kernel, not virtual machines. For a large public service, add a sandbox runtime such as gVisor under the container.
+- **Disk-heavy programs.** Programs fill only the size-capped tmpfs in Docker; outside Docker, they are limited per file but not in total.
 
 ## Development
 

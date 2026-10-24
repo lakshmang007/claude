@@ -25,7 +25,7 @@ export interface TestServer {
 export async function startTestServer(env: Record<string, string> = {}): Promise<TestServer> {
   const data = tempDir();
   const work = tempDir('runpad-work-');
-  const config = loadConfig({ PORT: '0', HOST: '127.0.0.1', RUNPAD_DATA: data, RUNPAD_WORK: work, ...env }, ['node', 'server']);
+  const config = loadConfig({ PORT: '0', HOST: '127.0.0.1', RUNPAD_DATA: data, RUNPAD_WORK: work, RUNPAD_WRITES_PER_MINUTE: '100000', ...env }, ['node', 'server']);
   const app = await startServer(config);
   return {
     url: `http://127.0.0.1:${app.port}`,

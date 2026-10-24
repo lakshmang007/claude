@@ -51,21 +51,25 @@ const CSP = [
 export async function startServer(config = loadConfig()) {
   const secret = loadSecret(config.dataDir);
   const signer = new TokenSigner(secret);
-  const store = await new PadStore({ dataDir: config.dataDir, maxPadChars: config.maxPadChars, history: config.history }).init();
-  const access = new Access(store, signer);
+  const store = await new PadStore({ dataDir: config.dataDir, maxPadChars: config.maxPadChars, maxTotalChars: config.maxTotalChars, history: config.history }).init();
+  if (config.adminToken && config.adminToken.length < 16) console.warn('RUNPAD_ADMIN_TOKEN is ignored: use at least 16 characters.');
+  const access = new Access(store, signer, config.adminToken);
   const collab = new CollabServer({ store, access });
 
   let exec = null;
   if (config.exec.enabled) {
     const only = process.env.RUNPAD_LANGUAGES ? process.env.RUNPAD_LANGUAGES.split(',').map((s) => s.trim()) : undefined;
-    const languages = await detectToolchains({ only, uid: config.exec.uid, gid: config.exec.gid });
+    // Toolchains are tried as the user programs will run as.
+    const probeUid = config.exec.uid ?? config.exec.uids?.[0] ?? null;
+    const languages = await detectToolchains({ only, uid: probeUid, gid: config.exec.uid !== null ? config.exec.gid : probeUid });
     const sandbox = new Sandbox({ ...config.exec, hide: [config.dataDir] }).init();
     exec = await new ExecServer({ config, store, access, signer, sandbox, languages }).init();
   }
 
   const clientIp = (req) => {
     if (config.trustProxy) {
-      const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
+      // The last address is the one our own proxy added; earlier ones come from the client.
+      const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',').pop().trim();
       if (fwd) return fwd;
     }
     return req.socket.remoteAddress ?? 'unknown';
@@ -167,9 +171,16 @@ export async function startServer(config = loadConfig()) {
   });
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: Math.max(4 * 1024 * 1024, config.maxPadChars * 4) });
+  /** @type {Map<string, number>} open WebSockets per client IP */
+  const sockets = new Map();
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url || '/', 'http://local');
     if (!url.pathname.startsWith('/_ws/')) return; // Vite's HMR socket, in development
+    const ip = clientIp(req);
+    if ((sockets.get(ip) ?? 0) >= config.maxSocketsPerIp) {
+      socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n');
+      return socket.destroy();
+    }
     const origin = req.headers.origin;
     if (origin) {
       let ok = false;
@@ -183,8 +194,17 @@ export async function startServer(config = loadConfig()) {
         return socket.destroy();
       }
     }
+    const track = (ws) => {
+      sockets.set(ip, (sockets.get(ip) ?? 0) + 1);
+      ws.once('close', () => {
+        const left = (sockets.get(ip) ?? 1) - 1;
+        if (left > 0) sockets.set(ip, left);
+        else sockets.delete(ip);
+      });
+    };
     if (url.pathname.startsWith('/_ws/doc/')) {
       wss.handleUpgrade(req, socket, head, (ws) => {
+        track(ws);
         const padPath = normalizePadPath(url.pathname.slice('/_ws/doc/'.length));
         if (!padPath) return ws.close(CLOSE_BAD_PATH, 'invalid pad');
         collab.handle(ws, padPath, parseTokens(url.searchParams.get('t') ?? '')).catch((err) => {
@@ -193,7 +213,10 @@ export async function startServer(config = loadConfig()) {
         });
       });
     } else if (url.pathname === '/_ws/exec' && exec) {
-      wss.handleUpgrade(req, socket, head, (ws) => exec.handle(ws, clientIp(req)));
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        track(ws);
+        exec.handle(ws, ip);
+      });
     } else {
       socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
       socket.destroy();
@@ -229,8 +252,15 @@ function lanAddresses() {
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
-  const config = loadConfig();
-  const app = await startServer(config);
+  let config;
+  let app;
+  try {
+    config = loadConfig();
+    app = await startServer(config);
+  } catch (err) {
+    console.error(`RunPad could not start: ${err.message}`);
+    process.exit(1);
+  }
   const hosts = config.host === '0.0.0.0' || config.host === '::' ? ['localhost', ...lanAddresses()] : [config.host];
   console.log(`RunPad${config.dev ? ' (development)' : ''} is running:`);
   for (const h of hosts) console.log(`  http://${h}:${app.port}/`);

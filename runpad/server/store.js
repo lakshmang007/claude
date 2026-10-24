@@ -60,6 +60,21 @@ async function readJson(file, fallback) {
   }
 }
 
+/** The pad index, keeping a running total of the characters in all pads. */
+class PadIndex extends Map {
+  total = 0;
+
+  set(key, value) {
+    this.total += (value?.size ?? 0) - (super.get(key)?.size ?? 0);
+    return super.set(key, value);
+  }
+
+  delete(key) {
+    this.total -= super.get(key)?.size ?? 0;
+    return super.delete(key);
+  }
+}
+
 export class Pad {
   /** @param {string} padPath */
   constructor(padPath) {
@@ -84,7 +99,7 @@ export class Pad {
 
 export class PadStore extends EventEmitter {
   /**
-   * @param {{ dataDir: string, maxPadChars: number, history: { intervalMs: number, maxEntries: number, maxBytes: number }, unloadDelayMs?: number }} opts
+   * @param {{ dataDir: string, maxPadChars: number, maxTotalChars?: number, history: { intervalMs: number, maxEntries: number, maxBytes: number }, unloadDelayMs?: number }} opts
    */
   constructor(opts) {
     super();
@@ -92,10 +107,12 @@ export class PadStore extends EventEmitter {
     this.padsDir = path.join(opts.dataDir, 'pads');
     this.historyDir = path.join(opts.dataDir, 'history');
     this.maxPadChars = opts.maxPadChars;
+    /** Once all pads together hold this much text, they may shrink but not grow. */
+    this.maxTotalChars = opts.maxTotalChars ?? Infinity;
     this.historyOpts = opts.history;
     this.unloadDelayMs = opts.unloadDelayMs ?? 30_000;
-    /** @type {Map<string, PadMeta>} */
-    this.index = new Map();
+    /** @type {PadIndex & Map<string, PadMeta>} */
+    this.index = new PadIndex();
     /** @type {Map<string, Pad>} */
     this.loaded = new Map();
     /** @type {Map<string, Promise<Pad>>} */
@@ -138,6 +155,11 @@ export class PadStore extends EventEmitter {
   }
 
   // ---- index -------------------------------------------------------------
+
+  /** True when the storage cap is reached (approximate: counts pad text only). */
+  isFull() {
+    return this.index.total >= this.maxTotalChars;
+  }
 
   /** @returns {PadMeta | null} */
   info(padPath) {

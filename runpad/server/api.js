@@ -1,4 +1,4 @@
-import { baseName, normalizePadPath } from '../shared/padpath.js';
+import { baseName, normalizePadPath, padUrl } from '../shared/padpath.js';
 import { LANGUAGE_BY_ID, effectiveLanguage } from '../shared/langs.js';
 import { hashPassword, parseTokens, verifyPassword } from './auth.js';
 import { mainFileName } from './languages.js';
@@ -118,6 +118,12 @@ class Limiter {
  */
 export function createApi({ config, store, access, signer, collab, exec, clientIp }) {
   const unlockLimiter = new Limiter(20, 10 * 60_000);
+  const writeLimiter = new Limiter(config.writesPerMinute, 60_000);
+
+  /** Refuses changes that would add text once the storage cap is reached. */
+  function mustHaveRoom(before, after) {
+    if (after > before && store.isFull()) throw new HttpError(507, 'This server’s storage is full, so new text cannot be saved right now.');
+  }
   const maxBodyBytes = config.maxPadChars * 3 + 1024;
 
   function tokensOf(req, url) {
@@ -160,8 +166,10 @@ export function createApi({ config, store, access, signer, collab, exec, clientI
   async function rawPut(req, res, padPath, tokens, append) {
     mustWrite(padPath, tokens);
     const body = await readBody(req, maxBodyBytes);
-    const next = append ? ((await store.getText(padPath)) ?? '') + body : body;
+    const current = (await store.getText(padPath)) ?? '';
+    const next = append ? current + body : body;
     if (next.length > config.maxPadChars) throw new HttpError(413, 'Pad would be too large');
+    mustHaveRoom(current.length, next.length);
     await store.setText(padPath, next, 'api');
     sendText(res, 200, `Saved ${next.length} characters to /${padPath}\n`);
   }
@@ -197,6 +205,11 @@ export function createApi({ config, store, access, signer, collab, exec, clientI
     const sub = rest.slice(slash + 1);
     const padPath = normalizePadPath(sub);
     if (!padPath) throw new HttpError(404, 'Not found');
+    // Previews live inside RunPad's editor. Refusing to open them as pages of their own
+    // keeps the site from being usable to host phishing pages.
+    if (req.headers['sec-fetch-dest'] === 'document') {
+      throw new HttpError(403, `Previews only show inside the editor. Open ${padUrl(padPath)} instead.`);
+    }
     mustRead(padPath, tokens);
     const text = (await store.getText(padPath)) ?? '';
     const ext = /\.([A-Za-z0-9]+)$/.exec(baseName(padPath))?.[1]?.toLowerCase();
@@ -207,8 +220,9 @@ export function createApi({ config, store, access, signer, collab, exec, clientI
       'Content-Length': body.length,
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
-      // An opaque origin: the page's scripts cannot reach RunPad or its storage.
-      'Content-Security-Policy': 'sandbox allow-scripts allow-forms allow-modals allow-popups allow-downloads',
+      // An opaque origin: the page's scripts cannot reach RunPad or its storage. Only
+      // RunPad itself may frame it.
+      'Content-Security-Policy': "sandbox allow-scripts allow-forms allow-modals allow-popups allow-downloads; frame-ancestors 'self'",
       // The URL carries lock tokens; links in the page must not pass it on.
       'Referrer-Policy': 'no-referrer',
     });
@@ -221,6 +235,7 @@ export function createApi({ config, store, access, signer, collab, exec, clientI
     'GET /_api/config': async (req, res) =>
       sendJson(res, 200, {
         maxPadChars: config.maxPadChars,
+        contact: config.contact,
         exec: exec ? exec.info() : { enabled: false, terminal: false, languages: [], needsKey: false },
       }),
 
@@ -327,6 +342,7 @@ export function createApi({ config, store, access, signer, collab, exec, clientI
       mustWrite(padPath, tokensOf(req, url));
       if (typeof body.text === 'string' && body.text) {
         if (body.text.length > config.maxPadChars) throw new HttpError(413, 'File is too large');
+        mustHaveRoom(0, body.text.length);
         if (!(await store.getText(padPath))) await store.setText(padPath, body.text, 'api');
       }
       await store.touch(padPath);
@@ -351,6 +367,9 @@ export function createApi({ config, store, access, signer, collab, exec, clientI
    * @param {URL} url
    */
   async function handleApi(req, res, url) {
+    if (req.method !== 'GET' && req.method !== 'HEAD' && !writeLimiter.take(clientIp(req))) {
+      throw new HttpError(429, 'Too many changes from your address. Wait a minute and try again.');
+    }
     const route = routes[`${req.method} ${url.pathname}`];
     if (route) return route(req, res, url);
     const [, kind, rest = ''] = /^\/_api\/(raw|zip|preview)\/(.*)$/.exec(url.pathname) ?? [];
@@ -397,6 +416,9 @@ export function createApi({ config, store, access, signer, collab, exec, clientI
   return {
     handleApi: guard(handleApi),
     rawGet: guard((req, res, url, padPath) => rawGet(res, padPath, tokensOf(req, url), { download: url.searchParams.has('download') })),
-    rawPut: guard((req, res, url, padPath) => rawPut(req, res, padPath, tokensOf(req, url), url.searchParams.has('append'))),
+    rawPut: guard((req, res, url, padPath) => {
+      if (!writeLimiter.take(clientIp(req))) throw new HttpError(429, 'Too many changes from your address. Wait a minute and try again.');
+      return rawPut(req, res, padPath, tokensOf(req, url), url.searchParams.has('append'));
+    }),
   };
 }

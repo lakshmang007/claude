@@ -1,0 +1,67 @@
+# RunPad as a public website, behind Caddy, which gets and renews the HTTPS certificate.
+#   cp .env.example .env    # then fill it in
+#   docker compose up -d --build
+services:
+  runpad:
+    build: ..
+    image: runpad
+    restart: unless-stopped
+    # A minimal init as PID 1 collects the processes the sandbox kills.
+    init: true
+    environment:
+      RUNPAD_TRUST_PROXY: "1"
+      # Refuse to start rather than let programs reach the network.
+      RUNPAD_FIREWALL: require
+      RUNPAD_CONTACT: ${RUNPAD_CONTACT:-}
+      RUNPAD_ADMIN_TOKEN: ${RUNPAD_ADMIN_TOKEN:-}
+      RUNPAD_EXEC_TOKEN: ${RUNPAD_EXEC_TOKEN:-}
+      RUNPAD_MAX_CONCURRENT: ${RUNPAD_MAX_CONCURRENT:-6}
+      RUNPAD_MAX_STORAGE_MB: ${RUNPAD_MAX_STORAGE_MB:-2048}
+    volumes:
+      - runpad-data:/data
+    # Everything programs can write is in memory and capped: their run directories and
+    # terminal workspaces (/work), and /dev/shm.
+    tmpfs:
+      - /work:size=${RUNPAD_WORK_SIZE:-1g},mode=0711,nosuid,nodev
+      - /tmp:size=64m,mode=0755,nosuid,nodev
+    shm_size: 16m
+    read_only: true
+    cap_drop: [ALL]
+    # Switch programs to their own users, manage their files, kill them, firewall them.
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, KILL, SETGID, SETUID, NET_ADMIN]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 2048
+    mem_limit: ${RUNPAD_MEMORY:-2g}
+    cpus: ${RUNPAD_CPUS:-2}
+    expose:
+      - "3000"
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - runpad
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  runpad-data:
+  caddy-data:
+  caddy-config:

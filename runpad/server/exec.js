@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -28,7 +28,9 @@ import { HELPERS, HELPER_SOURCE, isAttachableName, mainFileName, terminalShell, 
  *
  * Programs run in a fresh directory that holds the pad as its main file and the pad's
  * attached files (sub-pads with file names). Terminal commands run in a workspace kept
- * per pad, so files they create survive between commands.
+ * per pad, so files they create survive between commands. With a user range
+ * (RUNPAD_EXEC_UIDS), each run or command gets a user nobody else is using, owns only
+ * its own directory, and has its leftover processes killed when it ends.
  */
 
 const MAX_MESSAGE = 2 * 1024 * 1024;
@@ -99,6 +101,8 @@ export class ExecServer {
     this.wsDir = path.join(config.workDir, 'workspaces');
     this.cacheDir = path.join(config.workDir, 'cache');
     this.active = 0;
+    /** @type {Set<number>} per-run users now in use */
+    this.uidsInUse = new Set();
     /** @type {Map<string, number>} */
     this.perClient = new Map();
     this.rate = new RateLimiter(this.limits.runsPerMinute);
@@ -113,9 +117,11 @@ export class ExecServer {
     }
     // Leftovers from a previous run of the server.
     for (const name of await fsp.readdir(this.runsDir)) await fsp.rm(path.join(this.runsDir, name), { recursive: true, force: true });
-    // The build cache may hold files from before the sandbox user changed.
-    if (this.sandbox.uid !== null) spawnSync('chown', ['-R', `${this.sandbox.uid}:${this.sandbox.gid ?? this.sandbox.uid}`, this.cacheDir]);
-    await this.#own(this.cacheDir);
+    // The shared build cache (one sandbox user only) may hold files from before the user changed.
+    if (this.#sharedCache && this.sandbox.uid !== null) {
+      spawnSync('chown', ['-R', `${this.sandbox.uid}:${this.sandbox.gid ?? this.sandbox.uid}`, this.cacheDir]);
+      await this.#own(this.cacheDir, this.sandbox.uid);
+    }
     const helpers = path.join(this.config.workDir, 'helpers');
     await fsp.mkdir(helpers, { recursive: true, mode: 0o755 });
     await fsp.chmod(helpers, 0o755);
@@ -124,16 +130,15 @@ export class ExecServer {
       await fsp.chmod(path.join(helpers, name), 0o644);
     }
     useHelpersDir(helpers);
-    if (this.sandbox.uid !== null) {
+    if (this.sandbox.probeUid !== null) {
       // Every run would fail with "Permission denied"; say so now instead.
       const probe = spawnSync('/bin/sh', ['-c', 'cd "$1" && test -r "$2"', 'probe', this.runsDir, path.join(helpers, 'rp_sync.rb')], {
-        uid: this.sandbox.uid,
-        gid: this.sandbox.gid ?? this.sandbox.uid,
+        ...this.sandbox.as(this.sandbox.probeUid),
         stdio: 'ignore',
       });
       if (probe.status !== 0) {
         throw new Error(
-          `Programs run as uid ${this.sandbox.uid}, which cannot enter ${this.config.workDir}. ` +
+          `Programs run as uid ${this.sandbox.probeUid}, which cannot enter ${this.config.workDir}. ` +
             'Set RUNPAD_WORK to a directory whose parents everyone can enter, such as /tmp/runpad.',
         );
       }
@@ -145,6 +150,31 @@ export class ExecServer {
 
   close() {
     clearInterval(this.cleaner);
+    this.sandbox.close();
+  }
+
+  /** One Go build cache for everyone only when all runs share one user anyway. */
+  get #sharedCache() {
+    return !this.sandbox.uids;
+  }
+
+  /** A user for one run: unused one from the range, or the one sandbox user. */
+  #allocUid() {
+    const range = this.sandbox.uids;
+    if (!range) return this.sandbox.uid;
+    const size = range[1] - range[0] + 1;
+    if (this.uidsInUse.size >= size) throw new Error('No free sandbox user');
+    let uid;
+    do uid = range[0] + crypto.randomInt(size);
+    while (this.uidsInUse.has(uid));
+    this.uidsInUse.add(uid);
+    return uid;
+  }
+
+  #releaseUid(uid) {
+    if (!this.sandbox.uids || uid === null) return;
+    this.sandbox.reap(uid);
+    this.uidsInUse.delete(uid);
   }
 
   /** What the client needs to know: shown in the language menu and the run panel. */
@@ -175,9 +205,9 @@ export class ExecServer {
     }
   }
 
-  async #own(target) {
-    if (this.sandbox.uid === null) return;
-    await fsp.chown(target, this.sandbox.uid, this.sandbox.gid ?? this.sandbox.uid);
+  async #own(target, uid) {
+    const as = this.sandbox.as(uid);
+    if (as.uid !== undefined) await fsp.chown(target, as.uid, as.gid);
   }
 
   #keyOk(key) {
@@ -292,7 +322,7 @@ export class ExecServer {
    * Writes the pad and its attachments into `dir`.
    * @returns {Promise<{ main: string, files: string[], texts: Map<string, string> }>}
    */
-  async #writeFiles(dir, { padPath, language, code, tokens }) {
+  async #writeFiles(dir, { padPath, language, code, tokens, uid }) {
     const main = mainFileName(padPath ? baseName(padPath) : 'main', language, code);
     const attachments = await this.#attachments(padPath, tokens);
     const texts = new Map([[main, code]]);
@@ -302,7 +332,7 @@ export class ExecServer {
       // A program may have replaced a file with a link; never write through it.
       await fsp.rm(file, { force: true, recursive: true });
       await fsp.writeFile(file, text, { mode: 0o644 });
-      await this.#own(file);
+      await this.#own(file, uid);
     }
     return { main, files: [...texts.keys()], texts };
   }
@@ -326,10 +356,11 @@ export class ExecServer {
     if (padPath && !this.access.check(padPath, tokens).canRead) return fail('This pad is private.');
 
     const dir = path.join(this.runsDir, crypto.randomBytes(12).toString('hex'));
-    await fsp.mkdir(dir, { mode: 0o700 });
-    await this.#own(dir);
+    const uid = this.#allocUid();
     try {
-      const { main, files, texts } = await this.#writeFiles(dir, { padPath, language: runner.id, code, tokens });
+      await fsp.mkdir(dir, { mode: 0o700 });
+      await this.#own(dir, uid);
+      const { main, files, texts } = await this.#writeFiles(dir, { padPath, language: runner.id, code, tokens, uid });
       const plan = runner.plan({ main, files, read: (name) => texts.get(name) ?? '' });
       const env = { ...plan.env, ...this.#toolEnv() };
       const onOutput = (stream, data) => reply({ type: 'out', id, stream, data });
@@ -345,6 +376,7 @@ export class ExecServer {
           fileSizeMb: Math.max(this.limits.fileSizeMb, 64),
           maxOutputBytes: this.limits.maxOutputBytes,
           stdin: '',
+          uid,
           onOutput,
         });
         const result = await entry.job.done;
@@ -365,19 +397,25 @@ export class ExecServer {
         fileSizeMb: this.limits.fileSizeMb,
         maxOutputBytes: this.limits.maxOutputBytes,
         stdin: interactive ? null : stdin.endsWith('\n') ? stdin : stdin + '\n',
+        uid,
         onOutput,
       });
       const result = await entry.job.done;
       reply({ type: 'exit', id, phase: 'run', ...result });
     } finally {
+      this.#releaseUid(uid);
       await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
     }
   }
 
-  async #workspace(padPath) {
+  /** The pad's workspace, handed to `uid` (with everything earlier commands left in it). */
+  async #workspace(padPath, uid) {
     const dir = path.join(this.wsDir, this.signer.digest(padPath));
     await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
-    await this.#own(dir);
+    const as = this.sandbox.as(uid);
+    if (as.uid !== undefined) {
+      await new Promise((resolve) => execFile('chown', ['-R', '-h', `${as.uid}:${as.gid}`, dir], { timeout: 30_000 }, () => resolve(undefined)));
+    }
     const now = new Date();
     await fsp.utimes(dir, now, now).catch(() => {});
     return dir;
@@ -392,31 +430,37 @@ export class ExecServer {
     if (!command) return reply({ type: 'exit', id, phase: 'run', code: 0, signal: null, reason: null, timeMs: 0 });
     if (command.length > MAX_COMMAND) return fail('Command is too long.');
 
-    const dir = await this.#workspace(padPath);
-    const limit = this.limits.workspaceMb * 1024 * 1024;
-    if ((await dirSize(dir, limit)) > limit && !/^(rm|ls|du|df)\b/.test(command)) {
-      return fail(`This workspace holds more than ${this.limits.workspaceMb} MB. Delete files with rm, or reset the workspace.`);
-    }
     const code = typeof msg.code === 'string' ? msg.code : '';
     if (code.length > this.store.maxPadChars) return fail('The pad is too large.');
-    const language = LANGUAGE_BY_ID.has(msg.language) ? msg.language : 'plaintext';
-    const { main } = await this.#writeFiles(dir, { padPath, language, code, tokens });
+    const uid = this.#allocUid();
+    try {
+      const dir = await this.#workspace(padPath, uid);
+      const limit = this.limits.workspaceMb * 1024 * 1024;
+      if ((await dirSize(dir, limit)) > limit && !/^(rm|ls|du|df)\b/.test(command)) {
+        return fail(`This workspace holds more than ${this.limits.workspaceMb} MB. Delete files with rm, or reset the workspace.`);
+      }
+      const language = LANGUAGE_BY_ID.has(msg.language) ? msg.language : 'plaintext';
+      const { main } = await this.#writeFiles(dir, { padPath, language, code, tokens, uid });
 
-    reply({ type: 'phase', id, phase: 'run', command, interactive: true });
-    entry.job = this.sandbox.spawn({
-      argv: [this.shell, '-c', command],
-      cwd: dir,
-      env: { ...this.#toolEnv(), RUNPAD_MAIN: main, RUNPAD_PAD: padPath, PS1: '$ ' },
-      timeoutMs: this.limits.interactiveTimeoutMs,
-      cpuSeconds: Math.max(this.limits.cpuSeconds, 30),
-      memoryMb: null,
-      fileSizeMb: this.limits.fileSizeMb,
-      maxOutputBytes: this.limits.maxOutputBytes,
-      stdin: null,
-      onOutput: (stream, data) => reply({ type: 'out', id, stream, data }),
-    });
-    const result = await entry.job.done;
-    reply({ type: 'exit', id, phase: 'run', ...result });
+      reply({ type: 'phase', id, phase: 'run', command, interactive: true });
+      entry.job = this.sandbox.spawn({
+        argv: [this.shell, '-c', command],
+        cwd: dir,
+        env: { ...this.#toolEnv(), RUNPAD_MAIN: main, RUNPAD_PAD: padPath, PS1: '$ ' },
+        timeoutMs: this.limits.interactiveTimeoutMs,
+        cpuSeconds: Math.max(this.limits.cpuSeconds, 30),
+        memoryMb: null,
+        fileSizeMb: this.limits.fileSizeMb,
+        maxOutputBytes: this.limits.maxOutputBytes,
+        stdin: null,
+        uid,
+        onOutput: (stream, data) => reply({ type: 'out', id, stream, data }),
+      });
+      const result = await entry.job.done;
+      reply({ type: 'exit', id, phase: 'run', ...result });
+    } finally {
+      this.#releaseUid(uid);
+    }
   }
 
   async #reset(msg, id, reply, fail) {
@@ -427,15 +471,14 @@ export class ExecServer {
     reply({ type: 'exit', id, phase: 'reset', code: 0, signal: null, reason: null, timeMs: 0 });
   }
 
-  /** Environment for toolchains that need a writable cache (Go). */
+  /**
+   * Environment for Go. With a user per run, each run builds into its own HOME (slower
+   * the first time, but runs cannot tamper with each other's builds).
+   */
   #toolEnv() {
-    return {
-      GOCACHE: path.join(this.cacheDir, 'go-build'),
-      GOPATH: path.join(this.cacheDir, 'gopath'),
-      GOTOOLCHAIN: 'local',
-      CGO_ENABLED: '0',
-      GOTELEMETRY: 'off',
-    };
+    const go = { GOTOOLCHAIN: 'local', CGO_ENABLED: '0', GOTELEMETRY: 'off' };
+    if (!this.#sharedCache) return go;
+    return { ...go, GOCACHE: path.join(this.cacheDir, 'go-build'), GOPATH: path.join(this.cacheDir, 'gopath') };
   }
 
   /** Command line as shown to the user: tool names without install paths or helpers. */

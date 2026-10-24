@@ -1,5 +1,5 @@
 import { normalizePadPath, padUrl } from '../shared/padpath.js';
-import { api } from './api';
+import { api, reportLink } from './api';
 import { forgetPad, recentPads } from './recent';
 import { h, icon, timeAgo } from './util';
 
@@ -56,10 +56,13 @@ export function renderLanding(mount: HTMLElement): void {
 
   const feature = (iconName: string, title: string, text: string) => h('div.feature', null, h('span.feature-icon', null, icon(iconName, 20)), h('h3', null, title), h('p', null, text));
   const langs = h('p.landing-langs');
+  const report = h('span.landing-report');
   api
     .config()
     .then((c) => {
       langs.textContent = c.exec.enabled && c.exec.languages.length ? `Runs here: ${c.exec.languages.map((l) => l.name.replace(' (Node.js)', '')).join(', ')}.` : 'Code execution is turned off on this server.';
+      const link = reportLink(c.contact, location.origin);
+      if (link) report.replaceChildren(' To report abuse or ask for a pad to be removed, ', h('a', { href: link }, 'contact the operator'), '.');
     })
     .catch(() => {});
 
@@ -92,7 +95,12 @@ export function renderLanding(mount: HTMLElement): void {
         feature('eye', 'Live preview', 'Markdown renders as you type; HTML, CSS and JavaScript run in a sandboxed preview.'),
         feature('link', 'Works with curl', `curl ${host}/name prints a pad; curl --data-binary @file ${host}/name saves one.`),
       ),
-      h('footer.landing-footer', null, 'Anyone who knows a pad’s address can read and edit it unless it is locked. Don’t put secrets in open pads.'),
+      h(
+        'footer.landing-footer',
+        null,
+        'Anyone who knows a pad’s address can read and edit it unless it is locked. Don’t put passwords or personal data in open pads. Programs run on this server with time and memory limits and no network access.',
+        report,
+      ),
     ),
   );
   input.focus();

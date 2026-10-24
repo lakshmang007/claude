@@ -3,7 +3,7 @@ import { EditorView, keymap } from '@codemirror/view';
 import { isAttachableName, normalizePadPath, padUrl } from '../shared/padpath.js';
 import { LANGUAGE_BY_ID, LANGUAGES, languageFromName, mainFileName } from '../shared/langs.js';
 import { replaceText } from '../shared/ytext.js';
-import { api, apiPath, type ChildPad, type PadInfo, type ServerConfig } from './api';
+import { api, apiPath, reportLink, type ChildPad, type PadInfo, type ServerConfig } from './api';
 import { compartments, createPlainState, createState, languageSupport, loadLanguage, readOnlyExtension, reconfigure } from './editor';
 import { ExecClient } from './exec';
 import { PadDoc } from './pad';
@@ -881,6 +881,9 @@ export class PadApp {
         action: async () => toast((await copyText(location.origin + padUrl(this.path))) ? 'Link copied' : 'Could not copy', 'success', 1500),
       },
       { label: 'Use from the command line…', icon: 'terminal', action: () => openCli(doc.path) },
+      ...(reportLink(this.config.contact, location.origin + padUrl(this.path))
+        ? [{ label: 'Report this pad', icon: 'info', action: () => (location.href = reportLink(this.config.contact, location.origin + padUrl(this.path))!) }]
+        : []),
       ...(lang?.template && this.canEdit(this.main)
         ? [{ label: `Insert ${lang.name} starter program`, icon: 'wand', action: () => this.confirmTemplate(lang.id) }]
         : []),

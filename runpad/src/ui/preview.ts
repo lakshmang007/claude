@@ -10,7 +10,6 @@ export class PreviewPane {
   readonly el: HTMLElement;
   #body: HTMLElement;
   #title: HTMLElement;
-  #openLink: HTMLAnchorElement;
   #doc: PadDoc | null = null;
   #mode: 'markdown' | 'html' | null = null;
   #frame: HTMLIFrameElement | null = null;
@@ -19,11 +18,10 @@ export class PreviewPane {
 
   constructor(onClose: () => void) {
     this.#title = h('span.preview-title');
-    this.#openLink = h('a.icon-btn.small', { target: '_blank', rel: 'noopener', title: 'Open the page in a new tab', 'aria-label': 'Open in new tab' }, icon('link', 14)) as HTMLAnchorElement;
     const close = h('button.icon-btn.small', { type: 'button', title: 'Close preview', 'aria-label': 'Close preview' }, icon('x', 14));
     close.addEventListener('click', onClose);
     this.#body = h('div.preview-body');
-    this.el = h('section.preview-pane', { 'aria-label': 'Preview' }, h('div.preview-head', null, this.#title, h('span.spacer'), this.#openLink, close), this.#body);
+    this.el = h('section.preview-pane', { 'aria-label': 'Preview' }, h('div.preview-head', null, this.#title, h('span.spacer'), close), this.#body);
   }
 
   get mode(): 'markdown' | 'html' | null {
@@ -36,7 +34,6 @@ export class PreviewPane {
     this.#doc = doc;
     this.#mode = mode;
     this.#title.textContent = mode === 'html' ? 'Page preview' : 'Markdown preview';
-    this.#openLink.hidden = mode !== 'html';
     if (mode === 'html') {
       this.#frame = h('iframe.preview-frame', {
         title: 'Page preview',
@@ -73,7 +70,6 @@ export class PreviewPane {
     if (this.#mode === 'html' && this.#frame) {
       const url = `${previewUrl(doc.path)}?v=${++this.#version}`;
       this.#frame.src = url;
-      this.#openLink.href = previewUrl(doc.path);
       return;
     }
     const [{ marked }, { default: DOMPurify }] = await Promise.all([import('marked'), import('dompurify')]);

@@ -226,7 +226,31 @@ export class CollabServer {
               }
               return;
             }
-            syncProtocol.readSyncStep2(dec, room.pad.doc, ws);
+            // When storage is full, text typed now is taken out again; deleting still works.
+            const inserted = [];
+            const watch = (event) => {
+              let pos = 0;
+              for (const op of event.delta) {
+                if (op.retain) pos += op.retain;
+                else if (op.insert) {
+                  inserted.push([pos, op.insert.length]);
+                  pos += op.insert.length;
+                }
+              }
+            };
+            const full = this.store.isFull();
+            if (full) room.pad.text.observe(watch);
+            try {
+              syncProtocol.readSyncStep2(dec, room.pad.doc, ws);
+            } finally {
+              if (full) room.pad.text.unobserve(watch);
+            }
+            if (inserted.length) {
+              room.pad.doc.transact(() => {
+                for (const [pos, len] of inserted.reverse()) room.pad.text.delete(pos, len);
+              }, 'limit');
+              send(ws, encodeControl({ type: 'notice', level: 'error', message: 'This server’s storage is full, so new text cannot be saved right now.' }));
+            }
             if (this.store.enforceLimits(room.pad)) {
               const kb = Math.round(this.store.maxPadChars / 1024);
               send(ws, encodeControl({ type: 'notice', level: 'error', message: `Pads are limited to ${kb} KB; the end was cut off.` }));

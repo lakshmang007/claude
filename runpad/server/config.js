@@ -9,13 +9,23 @@ function num(value, fallback) {
   return value !== undefined && value !== '' && Number.isFinite(n) ? n : fallback;
 }
 
-const NOBODY = 65534;
+/** Each run gets its own user from this range when the server runs as root. */
+const DEFAULT_UIDS = '200000-200999';
 
 function optionalId(value) {
   if (value === undefined || value === '') return null;
   const n = Number(value);
   if (!Number.isInteger(n) || n < 0) throw new Error(`Expected a numeric uid/gid, got "${value}"`);
   return n;
+}
+
+function uidRange(value) {
+  if (!value) return null;
+  const m = /^(\d+)-(\d+)$/.exec(String(value).trim());
+  const lo = m ? Number(m[1]) : NaN;
+  const hi = m ? Number(m[2]) : NaN;
+  if (!(lo > 0 && hi >= lo && hi - lo < 1_000_000)) throw new Error(`RUNPAD_EXEC_UIDS must look like 200000-200999 (got "${value}")`);
+  return [lo, hi];
 }
 
 /**
@@ -25,8 +35,11 @@ function optionalId(value) {
  * @param {string[]} [argv]
  */
 export function loadConfig(env = process.env, argv = process.argv) {
-  // Programs never run as root: a root server runs them as `nobody` unless told otherwise.
-  const uid = optionalId(env.RUNPAD_EXEC_UID) ?? (process.getuid?.() === 0 ? NOBODY : null);
+  // Programs never run as root. A root server gives every run a user of its own from
+  // RUNPAD_EXEC_UIDS, unless RUNPAD_EXEC_UID names one user for all runs.
+  const uid = optionalId(env.RUNPAD_EXEC_UID);
+  const isRoot = process.getuid?.() === 0;
+  const uids = uid === null ? uidRange(env.RUNPAD_EXEC_UIDS ?? (isRoot ? DEFAULT_UIDS : '')) : null;
   return {
     port: num(env.PORT, 3000),
     host: env.HOST || '0.0.0.0',
@@ -36,6 +49,16 @@ export function loadConfig(env = process.env, argv = process.argv) {
     trustProxy: env.RUNPAD_TRUST_PROXY === '1',
     /** Longest pad, in characters. */
     maxPadChars: num(env.RUNPAD_MAX_PAD_KB, 1024) * 1024,
+    /** All pads together (approximately); once reached, pads can shrink but not grow. */
+    maxTotalChars: num(env.RUNPAD_MAX_STORAGE_MB, 2048) * 1024 * 1024,
+    /** Changes over HTTP (saves, locks, uploads) per client IP per minute. */
+    writesPerMinute: num(env.RUNPAD_WRITES_PER_MINUTE, 120),
+    /** Open WebSockets (editors and runs) per client IP. */
+    maxSocketsPerIp: num(env.RUNPAD_MAX_SOCKETS_PER_IP, 40),
+    /** Token that opens every pad and lock, for removing abuse. At least 16 characters. */
+    adminToken: env.RUNPAD_ADMIN_TOKEN || '',
+    /** Shown on the home page and in the menu for reporting abuse (an e-mail address or URL). */
+    contact: env.RUNPAD_CONTACT || '',
     history: {
       intervalMs: num(env.RUNPAD_SNAPSHOT_SECONDS, 120) * 1000,
       maxEntries: num(env.RUNPAD_HISTORY_ENTRIES, 50),
@@ -50,6 +73,10 @@ export function loadConfig(env = process.env, argv = process.argv) {
       sandbox: env.RUNPAD_SANDBOX || 'auto',
       uid,
       gid: optionalId(env.RUNPAD_EXEC_GID) ?? uid,
+      /** [first, last] user id for runs, one per run; null to use `uid` for all. */
+      uids,
+      /** auto: block programs' network with iptables when namespaces are unavailable; require; off. */
+      firewall: env.RUNPAD_FIREWALL || 'auto',
       compileTimeoutMs: num(env.RUNPAD_COMPILE_TIMEOUT, 30) * 1000,
       runTimeoutMs: num(env.RUNPAD_RUN_TIMEOUT, 15) * 1000,
       /** Wall-clock limit while a program waits for typed input, or a terminal command runs. */

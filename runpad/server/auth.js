@@ -104,10 +104,20 @@ export function parseTokens(raw) {
  * - read is open unless a lock in the chain is private, then it needs such a token too.
  */
 export class Access {
-  /** @param {{ lockChain(path: string): Array<{ path: string, mode: string, version: number }> }} store */
-  constructor(store, signer) {
+  /**
+   * @param {{ lockChain(path: string): Array<{ path: string, mode: string, version: number }> }} store
+   * @param {string} [adminToken] opens everything (ignored if shorter than 16 characters)
+   */
+  constructor(store, signer, adminToken = '') {
     this.store = store;
     this.signer = signer;
+    this.adminHash = adminToken.length >= 16 ? crypto.createHash('sha256').update(adminToken).digest() : null;
+  }
+
+  /** Whether one of the tokens is the admin token. */
+  isAdmin(tokens) {
+    if (!this.adminHash) return false;
+    return tokens.some((t) => crypto.timingSafeEqual(crypto.createHash('sha256').update(t).digest(), this.adminHash));
   }
 
   /**
@@ -117,7 +127,7 @@ export class Access {
   check(padPath, tokens) {
     const chain = this.store.lockChain(padPath);
     const valid = tokens.map((t) => this.signer.verify(t)).filter(Boolean);
-    const holds = chain.some((lock) => valid.some((v) => v.path === lock.path && v.version === lock.version));
+    const holds = this.isAdmin(tokens) || chain.some((lock) => valid.some((v) => v.path === lock.path && v.version === lock.version));
     const isPrivate = chain.some((lock) => lock.mode === 'private');
     const nearest = chain.at(-1);
     return {

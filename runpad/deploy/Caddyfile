@@ -1,0 +1,6 @@
+# Caddy gets a free HTTPS certificate for DOMAIN from Let's Encrypt and renews it.
+{$DOMAIN} {
+	encode zstd gzip
+	header Strict-Transport-Security "max-age=31536000"
+	reverse_proxy runpad:3000
+}

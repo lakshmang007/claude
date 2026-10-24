@@ -10,6 +10,8 @@ export interface LanguageRuntime {
 
 export interface ServerConfig {
   maxPadChars: number;
+  /** E-mail address or URL for reporting abuse, if the operator set one. */
+  contact?: string;
   exec: {
     enabled: boolean;
     terminal: boolean;
@@ -90,6 +92,16 @@ export const api = {
   touch: (p: string, text?: string) => request<{ ok: true }>('POST', '/_api/touch', p, { path: p, text }),
   remove: (p: string) => request<{ ok: true }>('POST', '/_api/delete', p, { path: p }),
 };
+
+/** Link for reporting a pad to the server's operator, or null if there is no contact. */
+export function reportLink(contact: string | undefined, padAddress: string): string | null {
+  if (!contact) return null;
+  if (/^https?:\/\//i.test(contact)) return contact;
+  if (!contact.includes('@')) return null;
+  const subject = encodeURIComponent(`Report: ${padAddress}`);
+  const body = encodeURIComponent(`Pad: ${padAddress}\n\nWhat is wrong with it:\n`);
+  return `mailto:${contact}?subject=${subject}&body=${body}`;
+}
 
 /** URL path of a pad below /_api/raw, /_api/zip etc. */
 export function apiPath(kind: 'raw' | 'zip', padPath: string, extra = ''): string {

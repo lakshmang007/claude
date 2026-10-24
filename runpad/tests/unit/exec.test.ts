@@ -79,6 +79,13 @@ describe('running programs', () => {
     expect(exitOf(events)).toMatchObject({ reason: 'killed' });
   });
 
+  it('applies its limits inside the program', async () => {
+    const code = 'import resource as r\nprint(r.getrlimit(r.RLIMIT_CPU), r.getrlimit(r.RLIMIT_CORE), r.getrlimit(r.RLIMIT_NPROC)[0])';
+    const out = stdout(await run('python', code, 'x'));
+    // CPU: 2 s soft, 3 s hard (RUNPAD_CPU_SECONDS=2); no core dumps; 128 processes when runs have their own user.
+    expect(out).toBe(`(2, 3) (0, 0) ${process.getuid?.() === 0 ? 128 : -1}\n`);
+  });
+
   it('reports crashes', async () => {
     const events = await run('python', 'import os, signal\nos.kill(os.getpid(), signal.SIGSEGV)', 'x');
     expect(exitOf(events)).toMatchObject({ code: null, signal: 'SIGSEGV' });
@@ -160,6 +167,108 @@ describe('terminal', () => {
     await fetch(`${srv.url}/_api/lock`, { method: 'POST', body: JSON.stringify({ path: 'termlocked', password: 'pass1234', mode: 'readonly' }) });
     const events = await client.job({ type: 'cmd', pad: 'termlocked', language: 'plaintext', code: '', command: 'ls' });
     expect(exitOf(events)).toMatchObject({ type: 'error', code: 'locked' });
+  });
+});
+
+// How RunPad runs inside Docker, where namespaces are blocked: plain processes, a user
+// per run, and an iptables rule instead of a network namespace.
+describe.skipIf(process.getuid?.() !== 0)('plain processes with a user per run', () => {
+  let plain: TestServer;
+  let pc: ExecTestClient;
+  let sandbox = '';
+
+  beforeAll(async () => {
+    plain = await startTestServer({ RUNPAD_SANDBOX: 'none', RUNPAD_LANGUAGES: 'python', RUNPAD_EXEC_UIDS: '210000-210099', RUNPAD_RUNS_PER_MINUTE: '1000', RUNPAD_MAX_PER_CLIENT: '4' });
+    pc = new ExecTestClient(plain.ws);
+    sandbox = String((await pc.hello).sandbox);
+  });
+
+  afterAll(async () => {
+    pc?.close();
+    await plain?.close();
+  });
+
+  it('blocks the network with a firewall rule', async () => {
+    expect(sandbox).toContain('a user per run (210000-210099)');
+    expect(sandbox).toContain('network blocked by firewall');
+    const code = 'import socket\ntry:\n    socket.create_connection(("1.1.1.1", 53), timeout=2)\n    print("net open")\nexcept OSError as e:\n    print("net blocked")';
+    expect(stdout(await pc.job({ type: 'run', language: 'python', code, stdin: 'x' }))).toBe('net blocked\n');
+  });
+
+  it('keeps runs out of each other’s files', async () => {
+    let release: () => void = () => {};
+    const ready = new Promise<void>((r) => (release = r));
+    const holder = pc.job(
+      { type: 'run', language: 'python', code: 'open("secret.txt", "w").write("s3cret")\nprint("ready", flush=True)\ninput()', stdin: '' },
+      (e, send) => {
+        if (e.type === 'out' && String(e.data).includes('ready')) {
+          release();
+          setTimeout(() => send({ type: 'stdin', data: '\n' }), 1500);
+        }
+      },
+    );
+    await ready;
+    const snoop = [
+      'import glob',
+      'found = []',
+      'for d in glob.glob("/proc/[0-9]*/cwd"):',
+      '    try:',
+      '        found.append(open(d + "/secret.txt").read())',
+      '    except OSError:',
+      '        pass',
+      'print("found" if found else "nothing")',
+    ].join('\n');
+    expect(stdout(await pc.job({ type: 'run', language: 'python', code: snoop, stdin: 'x' }))).toBe('nothing\n');
+    expect(exitOf(await holder)).toMatchObject({ code: 0 });
+  });
+
+  it('contains a fork bomb and cleans up after it', async () => {
+    const code = [
+      'import os, time',
+      'n = 0',
+      'for i in range(400):',
+      '    try:',
+      '        if os.fork() == 0:',
+      '            time.sleep(120)',
+      '            os._exit(0)',
+      '        n += 1',
+      '    except OSError:',
+      '        break',
+      'print("forked", n)',
+    ].join('\n');
+    const n = Number(/forked (\d+)/.exec(stdout(await pc.job({ type: 'run', language: 'python', code, stdin: 'x' })))?.[1]);
+    expect(n).toBeGreaterThan(50);
+    expect(n).toBeLessThan(128);
+    const sandboxed = () =>
+      fs.readdirSync('/proc').filter((p) => {
+        if (!/^\d+$/.test(p)) return false;
+        try {
+          const status = fs.readFileSync(`/proc/${p}/status`, 'utf8');
+          const uid = Number(/^Uid:\s+(\d+)/m.exec(status)?.[1]);
+          // Zombies are already dead; collecting them is the init process's job.
+          return uid >= 210000 && uid <= 210099 && !/^State:\s+Z/m.test(status);
+        } catch {
+          return false;
+        }
+      });
+    expect(sandboxed()).toEqual([]);
+    expect(stdout(await pc.job({ type: 'run', language: 'python', code: 'print("still fine")', stdin: 'x' }))).toBe('still fine\n');
+  });
+
+  it('kills processes a run leaves behind', async () => {
+    const code = 'import subprocess\nsubprocess.Popen(["sleep", "321"], start_new_session=True)\nprint("started")';
+    expect(stdout(await pc.job({ type: 'run', language: 'python', code, stdin: 'x' }))).toBe('started\n');
+    const leftovers = fs
+      .readdirSync('/proc')
+      .filter((p) => /^\d+$/.test(p))
+      .filter((p) => {
+        try {
+          return fs.readFileSync(`/proc/${p}/cmdline`, 'utf8') === 'sleep\u0000321\u0000';
+        } catch {
+          return false;
+        }
+      });
+    expect(leftovers).toEqual([]);
   });
 });
 
